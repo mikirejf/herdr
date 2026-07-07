@@ -1,11 +1,22 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::info;
 
 use crate::layout::PaneId;
 
 use super::terminal::GhosttyPaneCore;
+
+static DROID_SCROLLBACK_COMPAT: AtomicBool = AtomicBool::new(true);
+
+pub(crate) fn set_droid_scrollback_compat(enabled: bool) {
+    DROID_SCROLLBACK_COMPAT.store(enabled, Ordering::Relaxed);
+}
+
+fn droid_scrollback_compat_enabled() -> bool {
+    DROID_SCROLLBACK_COMPAT.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DefaultColorQuery {
@@ -836,7 +847,8 @@ pub(super) fn maybe_filter_primary_screen_scrollback_clear<'a>(
     // Droid redraws its primary-screen TUI with CSI 3 J, which erases pane
     // scrollback inside herdr. Keep the hack scoped to Droid on the primary
     // screen so normal terminal clear-history behavior still works elsewhere.
-    if alternate_screen
+    if !droid_scrollback_compat_enabled()
+        || alternate_screen
         || !contains_scrollback_clear_sequence(bytes)
         || !foreground_job.is_some_and(foreground_job_uses_droid_scrollback_compat)
     {

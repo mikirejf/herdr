@@ -868,11 +868,14 @@ impl Default for RemoteConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ExperimentalConfig {
     /// Allow launching herdr inside an existing herdr pane. Default: false.
     pub allow_nested: bool,
+    /// Preserve pane scrollback when Droid redraws its primary-screen TUI with
+    /// CSI 3 J. Set false to let Droid clear pane scrollback. Default: true.
+    pub droid_scrollback_compat: bool,
     /// Experimental local Kitty graphics rendering for attached clients. Default: false.
     pub kitty_graphics: bool,
     /// Persist pane screen history to session-history.json. Default: false.
@@ -907,6 +910,21 @@ pub struct ExperimentalConfig {
     /// source when prefix mode exits. macOS only; a no-op elsewhere and a
     /// best-effort no-op if the switch fails. Default: false.
     pub switch_ascii_input_source_in_prefix: bool,
+}
+
+impl Default for ExperimentalConfig {
+    fn default() -> Self {
+        Self {
+            allow_nested: false,
+            droid_scrollback_compat: true,
+            kitty_graphics: false,
+            pane_history: false,
+            reveal_hidden_cursor_for_cjk_ime: false,
+            cjk_ime_agents: Vec::new(),
+            cjk_ime_cursor_shape: ImeCursorShape::default(),
+            switch_ascii_input_source_in_prefix: false,
+        }
+    }
 }
 
 impl Default for KeysConfig {
@@ -1635,16 +1653,31 @@ kitty_graphics = true
     }
 
     #[test]
+    fn droid_scrollback_compat_default_on_and_parse() {
+        let config = Config::default();
+        assert!(config.experimental.droid_scrollback_compat);
+
+        let toml = r#"
+[experimental]
+droid_scrollback_compat = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.experimental.droid_scrollback_compat);
+    }
+
+    #[test]
     fn experimental_config_parses() {
         let toml = r#"
 [experimental]
 allow_nested = true
+droid_scrollback_compat = false
 kitty_graphics = true
 pane_history = true
 switch_ascii_input_source_in_prefix = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.experimental.allow_nested);
+        assert!(!config.experimental.droid_scrollback_compat);
         assert!(config.experimental.kitty_graphics);
         assert!(config.experimental.pane_history);
         assert!(config.experimental.switch_ascii_input_source_in_prefix);

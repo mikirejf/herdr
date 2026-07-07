@@ -357,6 +357,7 @@ impl App {
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
+        crate::pane::set_droid_scrollback_compat(config.experimental.droid_scrollback_compat);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
@@ -1398,6 +1399,7 @@ impl App {
             let was_kitty_graphics_enabled = self.state.kitty_graphics_enabled;
             self.state.kitty_graphics_enabled = config.experimental.kitty_graphics;
             crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
+            crate::pane::set_droid_scrollback_compat(config.experimental.droid_scrollback_compat);
             if was_kitty_graphics_enabled && !config.experimental.kitty_graphics {
                 let _ = crate::kitty_graphics::clear_all_host_graphics();
             }

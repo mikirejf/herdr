@@ -351,6 +351,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
+# Preserve pane scrollback when Droid redraws its primary-screen TUI.
+# Set false to let Droid clear pane scrollback, including Droid /clear.
+# droid_scrollback_compat = true
 # Experimental local Kitty graphics rendering for attached clients.
 # Requires a Kitty graphics-compatible outer terminal.
 # kitty_graphics = false
