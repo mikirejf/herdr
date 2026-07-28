@@ -1397,6 +1397,10 @@ impl TerminalState {
                 "herdr:codex",
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
+            ) | (
+                "herdr:droid",
+                "droid",
+                Some("startup" | "resume" | "compact")
             ) | ("herdr:mastracode", "mastracode", Some("startup"))
                 | ("herdr:hermes", "hermes", Some("startup" | "new" | "resume"))
                 | ("herdr:opencode", "opencode", Some("select"))
@@ -4982,6 +4986,76 @@ mod tests {
                 .as_ref()
                 .map(|session| session.session_ref.value.as_str()),
             Some("grok-new")
+        );
+    }
+
+    #[test]
+    fn droid_lifecycle_session_ref_replaces_existing_session_ref() {
+        for session_start_source in ["startup", "resume", "compact"] {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(Agent::Droid), AgentState::Idle);
+            terminal
+                .set_agent_session_ref(
+                    "herdr:droid".into(),
+                    "droid".into(),
+                    crate::agent_resume::AgentSessionRef::id("droid-session"),
+                    Some(20),
+                )
+                .expect("initial session should be accepted");
+
+            let next_session = format!("droid-{session_start_source}-session");
+            let mutation = terminal
+                .set_agent_session_ref_for_session_start(
+                    "herdr:droid".into(),
+                    "droid".into(),
+                    crate::agent_resume::AgentSessionRef::id(&next_session),
+                    Some(21),
+                    Some(session_start_source.into()),
+                )
+                .unwrap_or_else(|| panic!("{session_start_source} should replace the session"));
+
+            assert!(mutation.session_ref_changed);
+            assert_eq!(
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.session_ref.value.as_str()),
+                Some(next_session.as_str())
+            );
+        }
+    }
+
+    /// A Droid hook that predates the session-start reporting, or a payload with
+    /// no `source`, must not silently re-anchor the pane: without knowing why the
+    /// session started we cannot tell a replacement from a subagent's own.
+    #[test]
+    fn droid_session_ref_without_a_start_source_does_not_replace_existing_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Droid), AgentState::Idle);
+        terminal
+            .set_agent_session_ref(
+                "herdr:droid".into(),
+                "droid".into(),
+                crate::agent_resume::AgentSessionRef::id("droid-session"),
+                Some(20),
+            )
+            .expect("initial session should be accepted");
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "herdr:droid".into(),
+            "droid".into(),
+            crate::agent_resume::AgentSessionRef::id("nested-session"),
+            Some(21),
+            None,
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("droid-session")
         );
     }
 

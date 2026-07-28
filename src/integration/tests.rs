@@ -2176,7 +2176,7 @@ fn install_droid_is_idempotent_for_hook_entries() {
 }
 
 #[test]
-fn droid_v1_integration_status_is_outdated() {
+fn droid_v2_integration_status_is_outdated() {
     let _lock = integration_env_lock();
     let base = unique_base();
     let home = base.join("home");
@@ -2185,7 +2185,7 @@ fn droid_v1_integration_status_is_outdated() {
     let hook_path = droid_hooks_dir.join(DROID_HOOK_INSTALL_NAME);
     fs::write(
         &hook_path,
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=droid\n# HERDR_INTEGRATION_VERSION=1\n",
+        "#!/bin/sh\n# HERDR_INTEGRATION_ID=droid\n# HERDR_INTEGRATION_VERSION=2\n",
     )
     .unwrap();
     std::env::set_var("HOME", &home);
@@ -2197,7 +2197,7 @@ fn droid_v1_integration_status_is_outdated() {
         .unwrap();
 
     assert_eq!(droid.path, hook_path);
-    assert_eq!(droid.installed_version, Some(1));
+    assert_eq!(droid.installed_version, Some(2));
     assert_eq!(droid.expected_version, DROID_INTEGRATION_VERSION);
     assert_eq!(droid.state, IntegrationStatusKind::Outdated);
 

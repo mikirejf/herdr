@@ -51,18 +51,36 @@ session_id = hook_input.get("session_id")
 if not isinstance(session_id, str) or not session_id:
     raise SystemExit(0)
 
+# A Droid subagent runs in its own session but fires SessionStart from the same
+# pane as the agent that spawned it. Reporting it would re-anchor the pane onto
+# a session the user is not driving, so it is skipped and the pane keeps the
+# foreground session.
+if hook_input.get("calling_session_id") or hook_input.get("parent_session_id"):
+    raise SystemExit(0)
+
+# Droid reports how the session began: "startup" for a fresh one, "resume" when
+# an existing session is reloaded, "compact" when compaction forks a successor.
+# Herdr needs it to tell a replacement apart from a duplicate report of the
+# session it already holds.
+session_start_source = hook_input.get("source")
+if not isinstance(session_start_source, str) or not session_start_source:
+    session_start_source = None
+
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
+params = {
+    "pane_id": pane_id,
+    "source": source,
+    "agent": "droid",
+    "agent_session_id": session_id,
+    "seq": report_seq,
+}
+if session_start_source:
+    params["session_start_source"] = session_start_source
 request = {
     "id": request_id,
     "method": "pane.report_agent_session",
-    "params": {
-        "pane_id": pane_id,
-        "source": source,
-        "agent": "droid",
-        "agent_session_id": session_id,
-        "seq": report_seq,
-    },
+    "params": params,
 }
 
 try:
