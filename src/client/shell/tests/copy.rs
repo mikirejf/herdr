@@ -93,8 +93,8 @@ fn client_selection_uses_host_background_and_repaints_when_it_changes() {
             )]);
         }
         for (background, selected_bg, selected_fg) in [
-            ((237, 237, 234), (171, 171, 168), (0, 0, 0)),
-            ((26, 27, 38), (90, 91, 99), (255, 255, 255)),
+            ((237, 237, 234), (130, 130, 129), (0, 0, 0)),
+            ((26, 27, 38), (129, 130, 136), (0, 0, 0)),
         ] {
             let (r, g, b) = background;
             let outcome = state.handle_raw_events(vec![RawInputEvent::HostDefaultColor {

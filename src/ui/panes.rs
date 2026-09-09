@@ -758,7 +758,7 @@ fn automatic_selection_bg(p: &Palette, host_theme: crate::terminal_theme::Termin
     } else {
         (0, 0, 0)
     };
-    let selected = mix_rgb(background, target, 0.28);
+    let selected = mix_rgb(background, target, 0.45);
     Color::Rgb(selected.0, selected.1, selected.2)
 }
 
@@ -1509,9 +1509,9 @@ mod tests {
     #[test]
     fn automatic_selection_rgb_style_is_readable_with_or_without_host_background() {
         for (background, selected_bg, selected_fg) in [
-            ((239, 241, 245), (172, 174, 176), (0, 0, 0)),
-            ((26, 27, 38), (90, 91, 99), (255, 255, 255)),
-            ((45, 53, 59), (104, 110, 114), (255, 255, 255)),
+            ((239, 241, 245), (131, 133, 135), (0, 0, 0)),
+            ((26, 27, 38), (129, 130, 136), (0, 0, 0)),
+            ((45, 53, 59), (140, 144, 147), (0, 0, 0)),
         ] {
             let mut palette = Palette::catppuccin();
             let (r, g, b) = background;
