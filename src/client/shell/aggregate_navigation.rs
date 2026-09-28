@@ -260,6 +260,26 @@ impl crate::agent_view_eval::AgentViewEntry for ClientAgentViewEntry<'_> {
     }
 }
 
+/// Highest index `focus_agent` can reach, so the sidebar only numbers rows that
+/// actually have a key to press.
+const MAX_FOCUS_INDEX: usize = 9;
+
+/// Ranks in the order `focus_agent` indexes, so a rendered number is the key
+/// that jumps to that row. Keyed by endpoint and pane because the same pane id
+/// can exist on more than one machine.
+pub(super) fn focus_indexes(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    sort: crate::config::AgentPanelSortConfig,
+) -> HashMap<(ClientEndpointId, String), usize> {
+    online_agent_targets(endpoints, active_endpoint_id, sort)
+        .into_iter()
+        .take(MAX_FOCUS_INDEX)
+        .enumerate()
+        .map(|(position, target)| ((target.endpoint_id, target.pane_id), position + 1))
+        .collect()
+}
+
 pub(super) fn online_agent_targets(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,

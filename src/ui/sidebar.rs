@@ -135,6 +135,7 @@ pub(crate) fn resolved_token_spans(
             | ResolvedTokenKind::Pane(text)
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::TerminalTitle(text)
+            | ResolvedTokenKind::FocusIndex(text)
             | ResolvedTokenKind::Branch(text)
             | ResolvedTokenKind::Custom(text) => display_width(text),
             _ => 0,
@@ -263,7 +264,9 @@ pub(crate) fn resolved_token_spans(
                     ));
                 }
             }
-            ResolvedTokenKind::TerminalTitle(text) | ResolvedTokenKind::Custom(text) => {
+            ResolvedTokenKind::TerminalTitle(text)
+            | ResolvedTokenKind::FocusIndex(text)
+            | ResolvedTokenKind::Custom(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(custom_style, token.style),

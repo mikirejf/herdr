@@ -390,6 +390,7 @@ Agent rows accept these built-in tokens:
 - `agent` — detected or reported agent display name.
 - `terminal_title` — latest OSC 0/2 terminal title after safety normalization.
 - `terminal_title_stripped` — the terminal title with one recognized leading activity or spinner glyph and its following whitespace removed.
+- `focus_index` — rendered `[1]` through `[9]`, the index `focus_agent` uses to jump to that agent; omitted for rows past the ninth and for offline machines.
 - `$name` — custom pane metadata named `name`.
 
 Space rows accept these built-in tokens:

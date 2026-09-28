@@ -54,6 +54,8 @@ pub(super) fn render_agent_panel(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
@@ -67,7 +69,16 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
+    let indexes = super::aggregate_navigation::focus_indexes(
+        endpoints,
+        active_endpoint_id,
+        config.agent_panel_sort,
+    );
+    let rows = agent_rows(snapshot, config, None, &|pane_id| {
+        indexes
+            .get(&(active_endpoint_id.clone(), pane_id.to_owned()))
+            .copied()
+    });
     render_agent_list(
         buffer,
         area,
@@ -238,10 +249,14 @@ pub(super) fn agent_rows(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    focus_index: &dyn Fn(&str) -> Option<usize>,
 ) -> Vec<AgentRow> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
+        .filter_map(|pane_id| {
+            let index = focus_index(&pane_id);
+            agent_row(snapshot, &pane_id, config, machine, index)
+        })
         .collect()
 }
 
@@ -250,6 +265,7 @@ pub(super) fn agent_row(
     pane_id: &str,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    focus_index: Option<usize>,
 ) -> Option<AgentRow> {
     let agent = snapshot
         .agents
@@ -306,6 +322,7 @@ pub(super) fn agent_row(
             terminal_title: agent.terminal_title.as_deref(),
             terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
             canonical_agent,
+            focus_index,
             tokens: &tokens,
         },
         state_text,

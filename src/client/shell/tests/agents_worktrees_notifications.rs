@@ -429,6 +429,84 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
     ));
 }
 
+/// The printed number is only useful if it is the key that jumps to that row,
+/// so this asserts the rendered index against the binding rather than against
+/// the order the agents were declared in.
+#[test]
+fn focus_index_token_prints_the_key_that_focuses_each_agent() {
+    let mut projected = snapshot();
+    let mut second_pane = projected.panes[0].clone();
+    second_pane.pane_id = "pane_2".into();
+    second_pane.focused = false;
+    projected.panes.push(second_pane);
+    let mut idle = ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("idle one".into()),
+        display_agent: None,
+        agent: Some("pi".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 10,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    };
+    let mut blocked = idle.clone();
+    blocked.pane_id = "pane_2".into();
+    blocked.name = Some("blocked two".into());
+    blocked.agent_status = AgentStatus::Blocked;
+    blocked.state_change_seq = 20;
+    blocked.focused = false;
+    idle.name = Some("idle one".into());
+    projected.agents = vec![idle, blocked];
+
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    config.ui.sidebar.agents.rows = vec![vec![
+        crate::config::AgentSidebarToken::FocusIndex,
+        crate::config::AgentSidebarToken::Agent,
+    ]];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+
+    let frame = state.compose(106, 30).expect("agent sidebar frame");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("[1] · blocked two"), "frame: {text}");
+    assert!(text.contains("[2] · idle one"), "frame: {text}");
+
+    for (index, pane_id) in [(0, "pane_2"), (1, "pane_1")] {
+        let mut input = ClientShellInput::default();
+        state.record_binding(
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::FocusAgent(index)),
+            &mut input,
+        );
+        let [ClientShellAction::Endpoint { request, .. }] = &input.actions[..] else {
+            panic!("focus agent {index} should use endpoint API");
+        };
+        assert!(
+            matches!(
+                &request.method,
+                crate::api::schema::Method::PaneFocus(target) if target.pane_id == pane_id
+            ),
+            "focus agent {index} should target {pane_id}"
+        );
+    }
+}
+
 #[test]
 fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
     let mut projected = snapshot();

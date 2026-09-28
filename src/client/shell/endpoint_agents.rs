@@ -134,6 +134,11 @@ fn agent_rows(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
 ) -> Vec<EndpointAgentRow> {
+    let indexes = super::aggregate_navigation::focus_indexes(
+        endpoints,
+        active_endpoint_id,
+        config.agent_panel_sort,
+    );
     let mut rendered_rows = endpoints
         .iter()
         .filter_map(|endpoint| {
@@ -147,6 +152,9 @@ fn agent_rows(
                             &agent.pane_id,
                             config,
                             Some(&endpoint.label),
+                            indexes
+                                .get(&(endpoint.endpoint_id.clone(), agent.pane_id.clone()))
+                                .copied(),
                         )
                     })
                     .map(|agent| ((endpoint.endpoint_id.clone(), agent.pane_id.clone()), agent))

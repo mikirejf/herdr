@@ -19,6 +19,7 @@ pub(crate) enum ResolvedTokenKind {
     Pane(String),
     Agent(String),
     TerminalTitle(String),
+    FocusIndex(String),
     Branch(String),
     GitStatus { ahead: usize, behind: usize },
     Custom(String),
@@ -34,6 +35,7 @@ impl ResolvedTokenKind {
             | Self::Pane(value)
             | Self::Agent(value)
             | Self::TerminalTitle(value)
+            | Self::FocusIndex(value)
             | Self::Branch(value)
             | Self::Custom(value) => Some(value),
             Self::StateIcon | Self::GitStatus { .. } => None,
@@ -61,6 +63,8 @@ pub(crate) struct AgentTokenContext<'a> {
     pub(crate) terminal_title: Option<&'a str>,
     pub(crate) terminal_title_stripped: Option<&'a str>,
     pub(crate) canonical_agent: Option<crate::detect::Agent>,
+    /// Rank in the order `focus_agent` indexes, when the agent has a key to press.
+    pub(crate) focus_index: Option<usize>,
     pub(crate) tokens: &'a std::collections::HashMap<String, String>,
 }
 
@@ -103,6 +107,9 @@ pub(crate) fn agent_rows(
                         AgentSidebarToken::TerminalTitleStripped => context
                             .terminal_title_stripped
                             .map(|value| ResolvedTokenKind::TerminalTitle(value.to_string())),
+                        AgentSidebarToken::FocusIndex => context
+                            .focus_index
+                            .map(|index| ResolvedTokenKind::FocusIndex(format!("[{index}]"))),
                         AgentSidebarToken::Custom(name) => context
                             .tokens
                             .get(name)
@@ -200,6 +207,7 @@ mod tests {
         terminal_title: Option<String>,
         terminal_title_stripped: Option<String>,
         canonical_agent: Option<crate::detect::Agent>,
+        focus_index: Option<usize>,
         tokens: std::collections::HashMap<String, String>,
     }
 
@@ -212,6 +220,7 @@ mod tests {
             terminal_title: None,
             terminal_title_stripped: None,
             canonical_agent: Some(crate::detect::Agent::Pi),
+            focus_index: None,
             tokens: std::collections::HashMap::new(),
         }
     }
@@ -226,6 +235,7 @@ mod tests {
             terminal_title: entry.terminal_title.as_deref(),
             terminal_title_stripped: entry.terminal_title_stripped.as_deref(),
             canonical_agent: entry.canonical_agent,
+            focus_index: entry.focus_index,
             tokens: &entry.tokens,
         }
     }
@@ -454,6 +464,57 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
             vec![vec![
                 ResolvedToken::unstyled(ResolvedTokenKind::Machine("Build".into())),
                 ResolvedToken::unstyled(ResolvedTokenKind::Workspace("repo".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn focus_index_renders_a_key_and_elides_when_no_key_reaches_the_agent() {
+        let mut entry = entry();
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![
+                AgentSidebarToken::FocusIndex,
+                AgentSidebarToken::Agent,
+            ]],
+            ..Default::default()
+        };
+
+        entry.focus_index = Some(3);
+        assert_eq!(
+            agent_rows(&config, context(&entry), "working"),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::FocusIndex("[3]".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+            ]]
+        );
+
+        entry.focus_index = None;
+        assert_eq!(
+            agent_rows(&config, context(&entry), "working"),
+            vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
+                "pi".into()
+            ))]]
+        );
+    }
+
+    #[test]
+    fn focus_index_is_distinct_from_a_custom_token_of_the_same_name() {
+        let mut entry = entry();
+        entry.focus_index = Some(1);
+        entry.tokens.insert("focus_index".into(), "custom".into());
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![
+                AgentSidebarToken::FocusIndex,
+                AgentSidebarToken::Custom("focus_index".into()),
+            ]],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            agent_rows(&config, context(&entry), "working"),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::FocusIndex("[1]".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Custom("custom".into())),
             ]]
         );
     }
