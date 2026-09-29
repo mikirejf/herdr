@@ -866,3 +866,53 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
     shutdown_test_runtimes(&mut source_server);
     shutdown_test_runtimes(&mut target_server);
 }
+
+#[tokio::test]
+async fn surface_resync_sends_a_complete_surface_to_the_active_shell() {
+    let mut server = test_headless_server();
+    let _input_rx = install_focused_test_runtime(&mut server, b"");
+    let (writer, control_rx, render_rx) = test_client_writer();
+    let client_id = 53;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: true,
+            surface_scroll: false,
+            client_id,
+            surface_cols: 80,
+            surface_rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: true,
+            mouse_capture: true,
+            surface_active: true,
+            writer,
+        })
+    );
+    let _ = client_shell_snapshot(&control_rx);
+    server.render_and_stream();
+    let ServerMessage::PaneSurface(initial) =
+        read_server_message(render_rx.recv().expect("initial surface"))
+    else {
+        panic!("expected pane surface");
+    };
+    server.render_and_stream();
+    assert!(
+        render_rx.try_recv().is_err(),
+        "an unchanged surface is not resent"
+    );
+
+    assert!(!server.handle_server_event(ServerEvent::ClientShellSurfaceResync { client_id: 99 }));
+    assert!(server.handle_server_event(ServerEvent::ClientShellSurfaceResync { client_id }));
+    server.render_and_stream();
+    match read_server_message(render_rx.recv().expect("resync surface")) {
+        ServerMessage::PaneSurface(surface) => {
+            assert!(surface.surface_revision > initial.surface_revision);
+            assert_eq!(surface.frame, initial.frame);
+        }
+        other => panic!("expected a complete pane surface, got {other:?}"),
+    }
+    shutdown_test_runtimes(&mut server);
+}

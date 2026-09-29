@@ -43,7 +43,9 @@ pub(in crate::client::shell) use render::sidebar;
 pub(crate) use state::*;
 #[cfg(test)]
 pub(super) use surface_patch::apply_composed_surface_patch;
-pub(super) use surface_patch::{ClientComposedSurfacePatch, ClientPaneSurfacePatchOutcome};
+pub(super) use surface_patch::{
+    apply_patch_to_surface, ClientComposedSurfacePatch, ClientPaneSurfacePatchOutcome,
+};
 
 use crossterm::event::KeyCode;
 #[cfg(test)]

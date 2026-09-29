@@ -1239,6 +1239,52 @@ fn retained_surface_patch_rejects_stale_base_without_mutating_surface() {
         panes: Vec::new(),
         cursor: None,
     });
-    assert!(matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected));
+    assert!(
+        matches!(outcome, ClientPaneSurfacePatchOutcome::Diverged),
+        "a base mismatch within the presented projection needs a complete surface"
+    );
     assert_eq!(state.pane_surface, before);
+}
+
+#[test]
+fn surface_patch_waiting_for_a_complete_surface_is_not_divergence() {
+    let patch = |projection_revision| crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision,
+        base_surface_revision: 5,
+        surface_revision: 6,
+        rows: Vec::new(),
+        panes: Vec::new(),
+        cursor: None,
+    };
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    assert!(
+        matches!(
+            state.apply_pane_surface_patch(patch(1)),
+            ClientPaneSurfacePatchOutcome::Rejected
+        ),
+        "no presented surface: a local resize is waiting for the endpoint repaint"
+    );
+
+    state.set_pane_surface(surface());
+    assert!(
+        matches!(
+            state.apply_pane_surface_patch(patch(2)),
+            ClientPaneSurfacePatchOutcome::Rejected
+        ),
+        "a later projection belongs to a surface this shell has not installed"
+    );
+
+    let mut next = surface();
+    next.projection_revision = 2;
+    state.set_pane_surface(next);
+    assert!(state.pending_pane_surface.is_some());
+    assert!(
+        matches!(
+            state.apply_pane_surface_patch(patch(1)),
+            ClientPaneSurfacePatchOutcome::Rejected
+        ),
+        "a retained successor waits for its snapshot, not for a resync"
+    );
 }

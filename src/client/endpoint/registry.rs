@@ -65,6 +65,7 @@ pub(crate) struct EndpointConnection {
     pub(crate) surface_active: bool,
     pub(crate) negotiation: EndpointNegotiation,
     health: Option<EndpointHealth>,
+    surface_resync_requested: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +163,7 @@ impl EndpointRegistry {
                 surface_active,
                 negotiation,
                 health,
+                surface_resync_requested: false,
             },
         ) {
             previous.transport.disconnect();
@@ -285,6 +287,33 @@ impl EndpointRegistry {
                 self.record_failure(endpoint_id.clone(), error);
                 EndpointSendOutcome::NotSent
             }
+        }
+    }
+
+    /// Ask the endpoint for a complete surface after the shell fell out of step with its patch
+    /// stream. At most one request is outstanding until the endpoint sends a complete surface.
+    pub(crate) fn request_surface_resync(&mut self, endpoint_id: &ClientEndpointId) -> bool {
+        let Some(connection) = self.connections.get_mut(endpoint_id) else {
+            return false;
+        };
+        if connection.surface_resync_requested {
+            return false;
+        }
+        connection.surface_resync_requested = true;
+        let message = ClientMessage::EndpointControl {
+            kind: crate::protocol::endpoint::SURFACE_RESYNC_KIND.into(),
+            data: String::new(),
+        };
+        self.send_to(endpoint_id, &message) == EndpointSendOutcome::Sent
+    }
+
+    pub(crate) fn surface_received(&mut self, endpoint_id: &ClientEndpointId, generation: u64) {
+        if let Some(connection) = self
+            .connections
+            .get_mut(endpoint_id)
+            .filter(|connection| connection.generation == generation)
+        {
+            connection.surface_resync_requested = false;
         }
     }
 
@@ -433,6 +462,46 @@ mod tests {
             EndpointSendOutcome::Sent
         );
         assert_eq!(local_sent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn surface_resync_is_requested_once_until_a_complete_surface_arrives() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = EndpointRegistry::new(
+            FakeTransport {
+                sent: sent.clone(),
+                error: None,
+            },
+            1,
+            negotiation(),
+        );
+        let local = ClientEndpointId::Local;
+        let resyncs = |sent: &Arc<Mutex<Vec<ClientMessage>>>| {
+            sent.lock()
+                .unwrap()
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        ClientMessage::EndpointControl { kind, .. }
+                            if kind == crate::protocol::endpoint::SURFACE_RESYNC_KIND
+                    )
+                })
+                .count()
+        };
+
+        assert!(registry.request_surface_resync(&local));
+        assert!(!registry.request_surface_resync(&local));
+        assert_eq!(resyncs(&sent), 1);
+
+        registry.surface_received(&local, 2);
+        assert!(
+            !registry.request_surface_resync(&local),
+            "a surface from another connection does not answer this request"
+        );
+        registry.surface_received(&local, 1);
+        assert!(registry.request_surface_resync(&local));
+        assert_eq!(resyncs(&sent), 2);
     }
 
     #[test]

@@ -1452,6 +1452,7 @@ async fn run_client_loop(
                         )));
                     }
                     ServerMessage::PaneSurface(surface) => {
+                        write_stream.surface_received(&endpoint_id, generation);
                         if activation_message {
                             let progress = pending_activation.as_mut().map(|pending| {
                                 pending.receive_surface(&endpoint_id, generation, surface)
@@ -1487,6 +1488,16 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::PaneSurfacePatch(patch) => {
+                        if activation_message
+                            && pending_activation.as_mut().is_some_and(|pending| {
+                                pending.receive_surface_patch(&endpoint_id, generation, &patch)
+                            })
+                        {
+                            continue;
+                        }
+                        if !endpoint_active {
+                            continue;
+                        }
                         let patch_started = crate::render_prof::timer();
                         let apply_started = crate::render_prof::timer();
                         let outcome = state
@@ -1509,6 +1520,15 @@ async fn run_client_loop(
                                 }
                             }
                             Some(shell::ClientPaneSurfacePatchOutcome::Applied(None)) => true,
+                            Some(shell::ClientPaneSurfacePatchOutcome::Diverged) => {
+                                if write_stream.request_surface_resync(&endpoint_id) {
+                                    warn!(
+                                        endpoint = %endpoint_id.storage_key(),
+                                        "pane surface patch diverged from the presented surface; requested a complete surface"
+                                    );
+                                }
+                                false
+                            }
                             Some(shell::ClientPaneSurfacePatchOutcome::Rejected) | None => false,
                         };
                         apply_client_shell_input_source_changes(

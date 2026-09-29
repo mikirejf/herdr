@@ -2309,6 +2309,17 @@ impl HeadlessServer {
                     },
                 )
             }
+            ServerEvent::ClientShellSurfaceResync { client_id } => {
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                if !client.is_active_shell_client() {
+                    return false;
+                }
+                debug!(client_id, "client shell requested a complete pane surface");
+                client.request_repaint();
+                true
+            }
             ServerEvent::ClientShellPaneInput {
                 client_id,
                 pane_id,

@@ -498,6 +498,134 @@ fn typed_target_ack_sets_a_floor_for_same_boot_activation_evidence() {
     );
 }
 
+fn cell(symbol: &str) -> crate::protocol::CellData {
+    crate::protocol::CellData {
+        symbol: symbol.into(),
+        fg: 0,
+        bg: 0,
+        modifier: 0,
+        skip: false,
+        hyperlink: None,
+    }
+}
+
+fn surface_with_cells(boot_id: &str, revision: u64) -> crate::protocol::PaneSurfaceFrame {
+    let mut surface = surface(boot_id, revision, "pane");
+    surface.frame.cells = vec![cell(" "); 80 * 24];
+    surface
+}
+
+fn patch_cell(
+    surface: &crate::protocol::PaneSurfaceFrame,
+    base_surface_revision: u64,
+    x: u16,
+    symbol: &str,
+) -> crate::protocol::PaneSurfacePatch {
+    crate::protocol::PaneSurfacePatch {
+        boot_id: surface.boot_id.clone(),
+        projection_revision: surface.projection_revision,
+        base_surface_revision,
+        surface_revision: base_surface_revision + 1,
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x,
+            y: 0,
+            cells: vec![cell(symbol)],
+        }],
+        panes: surface.panes.clone(),
+        cursor: None,
+    }
+}
+
+#[test]
+fn target_patches_before_the_focus_reply_reach_the_committed_frame() {
+    let (mut shell, mut endpoints, _local_sent, _remote_sent) = shell_and_registry();
+    let target = endpoint();
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        target.clone(),
+        Some(crate::client::shell::ClientEndpointFocusTarget::Workspace(
+            "ws".into(),
+        )),
+        resize(),
+        40,
+        Instant::now(),
+    )
+    .unwrap();
+    let _ = activation.receive_response(
+        &ClientEndpointId::Local,
+        1,
+        "client-shell-surface:40:off",
+        &surface_success("client-shell-surface:40:off", false, 1),
+        &mut endpoints,
+    );
+    assert_eq!(
+        activation.receive_response(
+            &target,
+            7,
+            "client-shell-surface:40:on",
+            &surface_success("client-shell-surface:40:on", true, 2),
+            &mut endpoints,
+        ),
+        SurfaceActivationProgress::Pending
+    );
+    let mut snapshot = test_snapshot("remote-boot", 2);
+    snapshot.focused_workspace_id = Some("ws".into());
+    shell.cache_endpoint_snapshot_inactive_for_generation(&target, 7, Box::new(snapshot.clone()));
+    assert_eq!(
+        activation.receive_snapshot(&target, 7, &snapshot),
+        SurfaceActivationProgress::Pending
+    );
+    let full = surface_with_cells("remote-boot", 2);
+    assert_eq!(
+        activation.receive_surface(&target, 7, full.clone()),
+        SurfaceActivationProgress::Pending,
+        "the focus reply is still outstanding"
+    );
+
+    // The endpoint keeps streaming output while its focus reply waits on a response thread. Each
+    // patch is already the endpoint's baseline once it is sent.
+    assert!(activation.receive_surface_patch(&target, 7, &patch_cell(&full, 2, 0, "a")));
+    assert!(activation.receive_surface_patch(&target, 7, &patch_cell(&full, 3, 1, "b")));
+    assert!(
+        !activation.receive_surface_patch(&target, 6, &patch_cell(&full, 4, 2, "x")),
+        "a stale connection cannot advance the collected surface"
+    );
+    assert_eq!(
+        activation.receive_response(
+            &target,
+            7,
+            "client-shell-focus:40:1",
+            &workspace_focus_success("client-shell-focus:40:1", "ws"),
+            &mut endpoints,
+        ),
+        SurfaceActivationProgress::Ready
+    );
+    let ActivationPhase::ActivatingTarget { evidence, .. } = &activation.phase else {
+        panic!("activation is still collecting target evidence");
+    };
+    let collected = evidence.surface.as_ref().expect("collected surface");
+    assert_eq!(collected.surface_revision, 4);
+    assert_eq!(collected.frame.cells[0].symbol, "a");
+    assert_eq!(collected.frame.cells[1].symbol, "b");
+    assert_eq!(collected.frame.cells[2].symbol, " ");
+
+    assert!(matches!(
+        activation.complete(&mut shell, &mut endpoints),
+        Ok(ActivationCompletion::AwaitingPresentationSync { .. })
+    ));
+    // The presentation-sync reply is never delivered: the committed frame alone must already
+    // match the endpoint baseline, so the next live patch applies.
+    assert!(
+        !activation.receive_surface_patch(&target, 7, &patch_cell(&full, 4, 2, "c")),
+        "a patch for the committed projection belongs to the live shell"
+    );
+    assert!(matches!(
+        shell.apply_pane_surface_patch(patch_cell(&full, 4, 2, "c")),
+        crate::client::shell::ClientPaneSurfacePatchOutcome::Applied(_)
+    ));
+}
+
 #[test]
 fn stale_generation_and_boot_are_not_activation_evidence() {
     let mut activation = machine();

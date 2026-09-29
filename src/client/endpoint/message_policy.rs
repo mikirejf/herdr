@@ -35,6 +35,7 @@ pub(crate) fn accepts_endpoint_message(
             && matches!(
                 message,
                 ServerMessage::PaneSurface(_)
+                    | ServerMessage::PaneSurfacePatch(_)
                     | ServerMessage::ClientShellEndpointResponseChunk { .. }
             ))
         || (command_response
@@ -111,6 +112,23 @@ mod tests {
                 data: Vec::new(),
             }
         ));
+        assert!(
+            accepts_endpoint_message(
+                false,
+                true,
+                false,
+                &ServerMessage::PaneSurfacePatch(crate::protocol::PaneSurfacePatch {
+                    boot_id: "boot".into(),
+                    projection_revision: 1,
+                    base_surface_revision: 1,
+                    surface_revision: 2,
+                    rows: Vec::new(),
+                    panes: Vec::new(),
+                    cursor: None,
+                })
+            ),
+            "patches advance the surface the activation will commit"
+        );
         assert!(!accepts_endpoint_message(
             false,
             true,

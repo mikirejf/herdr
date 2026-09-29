@@ -6,7 +6,12 @@ pub(crate) struct ClientComposedSurfacePatch {
 }
 
 pub(crate) enum ClientPaneSurfacePatchOutcome {
+    /// The shell is waiting for a complete surface, so the patch has nothing to apply to.
     Rejected,
+    /// The patch continues the presented surface's projection, but the shell cannot follow it.
+    /// The endpoint has already committed the patch as its baseline, so only a complete surface
+    /// can bring the shell back in step.
+    Diverged,
     Applied(Option<ClientComposedSurfacePatch>),
 }
 
@@ -30,7 +35,7 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
     true
 }
 
-fn apply_patch_to_surface(
+pub(crate) fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
 ) -> bool {
@@ -106,6 +111,25 @@ fn pane_geometry_matches(
 }
 
 impl ClientShellState {
+    /// Only a patch for the presented projection proves that the endpoint moved past this shell.
+    /// Other mismatches belong to a complete surface the shell has not installed yet.
+    fn rejected_patch_outcome(
+        &self,
+        patch: &crate::protocol::PaneSurfacePatch,
+    ) -> ClientPaneSurfacePatchOutcome {
+        let diverged = self.pending_pane_surface.is_none()
+            && self.pane_surface_generation == self.active_snapshot_generation
+            && self.pane_surface.as_ref().is_some_and(|current| {
+                current.boot_id == patch.boot_id
+                    && current.projection_revision == patch.projection_revision
+            });
+        if diverged {
+            ClientPaneSurfacePatchOutcome::Diverged
+        } else {
+            ClientPaneSurfacePatchOutcome::Rejected
+        }
+    }
+
     pub(crate) fn apply_pane_surface_patch(
         &mut self,
         patch: crate::protocol::PaneSurfacePatch,
@@ -122,7 +146,7 @@ impl ClientShellState {
             || !current.graphics.placements.is_empty()
             || !current.graphics.retained_assets.is_empty()
         {
-            return ClientPaneSurfacePatchOutcome::Rejected;
+            return self.rejected_patch_outcome(&patch);
         }
 
         for updated in &patch.panes {
@@ -131,10 +155,10 @@ impl ClientShellState {
                 .iter()
                 .find(|pane| pane.pane_id == updated.pane_id)
             else {
-                return ClientPaneSurfacePatchOutcome::Rejected;
+                return self.rejected_patch_outcome(&patch);
             };
             if !pane_geometry_matches(existing, updated) {
-                return ClientPaneSurfacePatchOutcome::Rejected;
+                return self.rejected_patch_outcome(&patch);
             }
         }
         for row in &patch.rows {
@@ -164,7 +188,7 @@ impl ClientShellState {
                     terminal_row || scrollbar_row
                 })
             {
-                return ClientPaneSurfacePatchOutcome::Rejected;
+                return self.rejected_patch_outcome(&patch);
             }
         }
 
@@ -202,7 +226,7 @@ impl ClientShellState {
                 .as_mut()
                 .is_some_and(|surface| apply_patch_to_surface(surface, &patch));
             if !applied {
-                return ClientPaneSurfacePatchOutcome::Rejected;
+                return self.rejected_patch_outcome(&patch);
             }
             for updated in &patch.panes {
                 let Some(hit) = self
@@ -248,7 +272,7 @@ impl ClientShellState {
         } else {
             let mut next = current.clone();
             if !apply_patch_to_surface(&mut next, &patch) {
-                return ClientPaneSurfacePatchOutcome::Rejected;
+                return self.rejected_patch_outcome(&patch);
             }
             self.set_pane_surface(next);
         }

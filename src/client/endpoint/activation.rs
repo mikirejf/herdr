@@ -561,6 +561,26 @@ impl PendingEndpointActivation {
         self.progress()
     }
 
+    /// Returns whether the patch belonged to this activation's collected surface. Anything else
+    /// is left to the committed shell.
+    pub(crate) fn receive_surface_patch(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        patch: &crate::protocol::PaneSurfacePatch,
+    ) -> bool {
+        let (lease, evidence) = match &mut self.phase {
+            ActivationPhase::ActivatingTarget { evidence, .. } => (&self.target, evidence),
+            ActivationPhase::RestoringSource { evidence, .. } => (&self.source, evidence),
+            ActivationPhase::SynchronizingPresentation {
+                lease, evidence, ..
+            } => (&*lease, evidence),
+            _ => return false,
+        };
+        endpoint_matches(lease, endpoint_id, generation, &patch.boot_id)
+            && evidence.record_patch(patch)
+    }
+
     pub(crate) fn receive_presentation_effects_ready(
         &mut self,
         endpoint_id: &ClientEndpointId,

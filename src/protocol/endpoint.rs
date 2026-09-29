@@ -24,6 +24,10 @@ pub const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
 pub const PRESENTATION_EFFECTS_FENCE_CAPABILITY: &str = "presentation_effects_fence";
 pub const PRESENTATION_EFFECTS_SYNC_KIND: &str = "endpoint.presentation.sync.v1";
 pub const PRESENTATION_EFFECTS_READY_KIND: &str = "endpoint.presentation.ready.v1";
+/// Client-to-server request for a complete pane surface after the client could not apply a
+/// patch. Servers without it ignore the unknown control; the client then waits for the next
+/// complete surface as before.
+pub const SURFACE_RESYNC_KIND: &str = "endpoint.surface.resync.v1";
 pub const HEALTH_CHECK_CAPABILITY: &str = "health_check";
 pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";

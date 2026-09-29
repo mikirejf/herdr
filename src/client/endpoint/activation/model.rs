@@ -45,6 +45,28 @@ impl ActivationEvidence {
         }
     }
 
+    /// The endpoint commits every sent patch as its new baseline, so the collected surface must
+    /// follow them or the committed frame would start behind the endpoint. Returns whether the
+    /// patch continued the collected surface.
+    pub(super) fn record_patch(&mut self, patch: &crate::protocol::PaneSurfacePatch) -> bool {
+        let Some(surface) = self.surface.as_mut() else {
+            return false;
+        };
+        if surface.boot_id != patch.boot_id
+            || surface.projection_revision != patch.projection_revision
+            || surface.surface_revision != patch.base_surface_revision
+        {
+            return false;
+        }
+        if !crate::client::shell::apply_patch_to_surface(surface, patch) {
+            // The endpoint validated this patch against the same baseline, so a failure means the
+            // collected surface is corrupt. Never commit a partially patched frame.
+            tracing::warn!("activation surface could not follow an endpoint patch");
+            self.surface = None;
+        }
+        true
+    }
+
     pub(super) fn invalidate_surface(&mut self) {
         self.surface = None;
     }
