@@ -23,18 +23,29 @@ The rig is a local sshd behind `delay_proxy.py`, a fixed-delay TCP proxy, with f
 
 Set `HERDR_REMOTE_BIN` to a fork build when the change is on the remote side. By default the remote runs the `herdr` on PATH.
 
-Baseline at 66 ms, fork `f0f13de5` against stock 0.9.1 on the remote:
+Baseline at 66 ms, fork build on both ends (`65a3e8a5`), medians with p90 in brackets:
 
-| Action | Visible | Settled | Turns | Bytes down |
-| --- | --- | --- | --- | --- |
-| Switch to remote | ~110 ms | ~270 ms | 3 | ~14 KB |
-| Pane focus | ~77 ms | ~84 ms | 1 | ~0.9 KB |
+| Action | Loss | Visible | Settled | Turns | Bytes down |
+| --- | --- | --- | --- | --- | --- |
+| Switch to remote | none | ~105 ms | ~260 ms | 3 | ~14 KB |
+| Switch to remote | 1% down | ~107 ms (131) | ~264 ms (383) | 3 | ~14 KB |
+| Pane focus | none | ~78 ms | ~85 ms | 1 | ~0.9 KB |
+| Pane focus | 1% down | ~77 ms (94) | ~84 ms (106) | 1 | ~0.9 KB |
 
-The goal is local speed: ~27 ms to switch to a local workspace, with no link traffic.
+The goal is local speed: ~27 ms to switch to a local workspace, with no link traffic. Loss moves the tail, not the median, so judge loss runs by p90 and max with `N` of 30 or more.
+
+## Adding packet loss
+
+The real jan-box link loses ~1%, mostly server to client, and TCP turns one lost segment into 250 ms to several seconds of recovery. The proxy can't drop segments, so `lo_netem.sh` adds delay and loss in the kernel (macOS dummynet) on the rig's sshd port only, and clamps segments to Tailscale's size so a screen update spans as many packets as on the real link.
+
+1. `sudo scripts/latency/lo_netem.sh on 66 1`: RTT, loss down %, optional loss up %.
+2. `scripts/latency/rig.sh run 66 30`. The rig prints a `shaping:` line and a `shaped path check`; the check must read ~66 ms and `mss 1216`, or the shaping is not active.
+3. `rig.sh stop` if you used `setup`, then `sudo scripts/latency/lo_netem.sh off`.
+
+Dummynet loss is random per packet; the real link drops back-to-back segments, so the real tail is worse. `lo_netem.sh status` shows whether shaping is on.
 
 ## Gotchas
 
-- The rig has delay only. It has no loss or bandwidth cap: a userspace TCP proxy can't drop segments the way a real link does. The real jan-box link loses ~1% in bursts, and that loss turns one lost segment into 250 ms to several seconds of TCP recovery. Check loss-sensitive designs against the real machine as well.
 - `HRIG_DIR` must stay short, 60 bytes at most. herdr's unix sockets live under the fake HOMEs, and macOS caps socket paths at 104 bytes. `$TMPDIR` is too long.
 - One rig at a time. After a killed run, `rig.sh stop` cleans up.
 - `ui_bench.py` runs through `uv run --script`, which fetches `pyte`. Pane focus clicks columns in whatever workspace is current. Pair it with the workspace flags, or attach a session that already shows the remote workspace.

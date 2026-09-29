@@ -13,6 +13,11 @@
 # runs under `env -i HOME=<fake home>`, so the real server, ~/.config/herdr and
 # ~/.ssh are never touched.
 #
+# Packet loss: run `sudo lo_netem.sh on RTT_MS LOSS_DOWN_PCT` before the rig. If
+# its state file names SSHD_PORT, delay and loss come from the kernel (dummynet
+# on lo0), the proxy runs with RTT 0 and only writes the trace, and RTT_MS here
+# is ignored. Remove it with `sudo lo_netem.sh off` after `rig.sh stop`.
+#
 # env:   HERDR_BIN         client and local server build (default: this repo's
 #                          target/release/herdr if it exists, else herdr on PATH)
 #        HERDR_REMOTE_BIN  build the fake remote machine runs (default: herdr on PATH)
@@ -48,6 +53,7 @@ esac
 COMMAND=${1:-}
 [ $# -gt 0 ] && shift
 case $COMMAND in run | setup | stop) ;; *) usage >&2; exit 2 ;; esac
+RTT_GIVEN=${1+x}
 RTT=${1:-66}
 N=${2:-5}
 [[ $RTT =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "RTT_MS must be a number, got '$RTT'"
@@ -63,6 +69,60 @@ esac
 [ ${#HRIG_DIR} -le 60 ] || die "HRIG_DIR is too long for unix socket paths (max 60 bytes)"
 
 PYTHON=$(command -v python3) || die "python3 not found"
+
+NETEM_STATE=/tmp/herdr-latency-netem.state
+PROXY_RTT=$RTT
+SHAPING=
+LOSS_LABEL=
+
+netem_field() {
+    local value
+    value=$(tr ' ' '\n' <"$NETEM_STATE" | sed -n "s/^$1=//p")
+    [[ $value =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "bad $1 in $NETEM_STATE: '$value'"
+    echo "$value"
+}
+
+# When lo_netem.sh shapes SSHD_PORT the kernel supplies delay and loss, so the
+# proxy only writes the trace.
+detect_netem() {
+    [ -f "$NETEM_STATE" ] || return 0
+    local port loss_down loss_up
+    port=$(netem_field port) && loss_down=$(netem_field loss_down) && loss_up=$(netem_field loss_up) \
+        && NETEM_RTT=$(netem_field rtt) || exit 1
+    [ "$port" = "$SSHD_PORT" ] \
+        || die "lo_netem shapes port $port but this rig uses SSHD_PORT=$SSHD_PORT. Run: sudo $HERE/lo_netem.sh off (or set SSHD_PORT=$port)"
+    if [ -n "$RTT_GIVEN" ] && ! awk -v a="$RTT" -v b="$NETEM_RTT" 'BEGIN { exit !(a == b) }'; then
+        echo "rig.sh: note: RTT_MS $RTT ignored, lo_netem is set to $NETEM_RTT ms"
+    fi
+    RTT=$NETEM_RTT
+    PROXY_RTT=0
+    LOSS_LABEL=", loss down $loss_down% up $loss_up%"
+    SHAPING="shaping: lo_netem RTT $RTT ms, loss down $loss_down% up $loss_up% (sudo scripts/latency/lo_netem.sh off to remove)"
+}
+
+# A TCP connect to sshd costs one shaped round trip (SYN up, SYN-ACK down), so
+# its time checks that the kernel rules are really applied.
+shaped_path_check() {
+    "$PYTHON" - "$SSHD_PORT" "$RTT" <<'EOF' || die "shaped path check failed"
+import socket, sys, time
+
+port, target = int(sys.argv[1]), float(sys.argv[2])
+samples = []
+for _ in range(10):
+    t0 = time.monotonic()
+    conn = socket.create_connection(("127.0.0.1", port), timeout=10)
+    samples.append((time.monotonic() - t0) * 1000)
+    mss = conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG)
+    conn.close()
+samples.sort()
+median = samples[len(samples) // 2]
+print(f"shaped path check (target {target:g} ms): connect median {median:.1f} ms, "
+      f"min {samples[0]:.1f}, max {samples[-1]:.1f}, mss {mss}")
+if target > 0 and median < target / 2:
+    print("WARNING: the connect is much faster than the target, so the lo_netem rules look inactive "
+          "(stale state file? run: sudo scripts/latency/lo_netem.sh off, then on)", file=sys.stderr)
+EOF
+}
 
 # Every herdr call goes through env -i so no HERDR_*/XDG_* variable of the
 # calling session can point it at the real server or config.
@@ -247,10 +307,14 @@ setup() {
     start_detached sshd "$HRIG_DIR/sshd_config" "$HRIG_DIR" "$RUN/sshd.log" \
         /usr/sbin/sshd -f "$HRIG_DIR/sshd_config" -D -p "$SSHD_PORT"
     start_detached proxy delay_proxy.py "$HRIG_DIR" "$RUN/proxy.log" \
-        "$PYTHON" "$HERE/delay_proxy.py" "$PROXY_PORT" "$SSHD_PORT" "$RTT" "$RUN/trace.log"
+        "$PYTHON" "$HERE/delay_proxy.py" "$PROXY_PORT" "$SSHD_PORT" "$PROXY_RTT" "$RUN/trace.log"
     wait_for 5 nc -z 127.0.0.1 "$SSHD_PORT" || die "sshd did not start (see $RUN/sshd.log)"
     wait_for 5 nc -z 127.0.0.1 "$PROXY_PORT" || die "proxy did not start (see $RUN/proxy.log)"
-    "$PYTHON" "$HERE/delay_proxy.py" --selftest "$RTT" || die "proxy selftest failed"
+    if [ -n "$SHAPING" ]; then
+        shaped_path_check
+    else
+        "$PYTHON" "$HERE/delay_proxy.py" --selftest "$RTT" || die "proxy selftest failed"
+    fi
 
     # Remote side: a workspace with two panes side by side showing distinct
     # text. The markers are printed with printf so the typed command line
@@ -296,7 +360,7 @@ bench() {
         --remote-ws '· rigremote' --remote-marker LEFT-PANE-MARKER \
         --local-ws '· local' --local-marker LOCAL-PANE-MARKER \
         --pane-cols 60,150 --trace "$RUN/trace.log" ${json[@]+"${json[@]}"} \
-        --label "RTT $RTT ms, client $CLIENT_BIN, remote $HERDR_REMOTE_BIN" \
+        --label "RTT $RTT ms${LOSS_LABEL}, client $CLIENT_BIN, remote $HERDR_REMOTE_BIN" \
         -- $(client_command) &
     echo "$! ui_bench.py" >"$RUN/bench.pid"
     wait $!
@@ -323,8 +387,10 @@ if [ "$COMMAND" = stop ]; then
     exit 0
 fi
 
+detect_netem
 resolve_binaries
 echo "herdr latency rig: RTT $RTT ms, N=$N, state dir $HRIG_DIR"
+[ -n "$SHAPING" ] && echo "  $SHAPING"
 echo "  client + local server: $(describe_binary "$CLIENT_BIN")"
 echo "  remote:                $(describe_binary "$HERDR_REMOTE_BIN")"
 echo "  repo HEAD:             $(git -C "$REPO" log -1 --format='%h %cd' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null)"
