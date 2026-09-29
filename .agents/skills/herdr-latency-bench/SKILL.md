@@ -23,16 +23,19 @@ The rig is a local sshd behind `delay_proxy.py`, a fixed-delay TCP proxy, with f
 
 Set `HERDR_REMOTE_BIN` to a fork build when the change is on the remote side. By default the remote runs the `herdr` on PATH.
 
-Baseline at 66 ms, fork build on both ends (`65a3e8a5`), medians with p90 in brackets:
+Baseline at 66 ms, fork build on both ends (`c8cd5267`), medians with p90 in brackets:
 
 | Action | Loss | Visible | Settled | Turns | Bytes down |
 | --- | --- | --- | --- | --- | --- |
-| Switch to remote | none | ~105 ms | ~260 ms | 3 | ~14 KB |
-| Switch to remote | 1% down | ~107 ms (131) | ~264 ms (383) | 3 | ~14 KB |
-| Pane focus | none | ~78 ms | ~85 ms | 1 | ~0.9 KB |
-| Pane focus | 1% down | ~77 ms (94) | ~84 ms (106) | 1 | ~0.9 KB |
+| Switch to remote | none | ~22 ms (25) | ~83 ms (86) | 1 | ~90 B |
+| Switch to remote | 1% down | ~20 ms (24) | ~82 ms (85) | 1 | ~90 B |
+| Switch to local | 1% down | ~21 ms (25) | ~33 ms (37) | 0 | 0 |
+| Pane focus | none | ~1 ms | ~72 ms (72) | 1 | ~0.3 KB |
+| Pane focus | 1% down | ~1 ms | ~72 ms (99) | 1 | ~0.3 KB |
 
-The goal is local speed: ~27 ms to switch to a local workspace, with no link traffic. Loss moves the tail, not the median, so judge loss runs by p90 and max with `N` of 30 or more.
+The rig's switch alternates between the same remote and local workspace, so the remote is always warm: its surface streams in the background and the switch presents it without waiting. The remaining turn is the foreground handshake and window title, which arrive after the frame. `first switch -> remote` is the cold path, one round trip (~100 ms).
+
+The goal is local speed: ~22 ms to switch to a local workspace, with no link traffic. Loss moves the tail, not the median, so judge loss runs by p90 and max with `N` of 30 or more.
 
 ## Adding packet loss
 
