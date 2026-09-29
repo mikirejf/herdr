@@ -20,7 +20,15 @@ pub(super) fn dispatch_client_shell_actions(
                 if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
                     endpoints.active_id() == &endpoint_id && endpoints.active_surface_available()
                 }) {
-                    endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                    let superseded = endpoint_commands.enqueue(
+                        endpoint_id,
+                        connection.generation,
+                        boot_id,
+                        request,
+                    );
+                    if let (Some(request_id), Some(shell)) = (superseded, shell.as_deref_mut()) {
+                        shell.forget_superseded_request(&request_id);
+                    }
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }

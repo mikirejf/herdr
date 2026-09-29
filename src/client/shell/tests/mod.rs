@@ -63,6 +63,7 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
         }],
         agents: Vec::new(),
         commands: Vec::new(),
+        pane_focus_style: None,
     }
 }
 
@@ -258,5 +259,6 @@ mod keybindings_settings;
 mod link_hover;
 mod mobile;
 mod mouse_selection;
+mod pane_focus;
 mod popup_focus_projection;
 mod startup_overlays;

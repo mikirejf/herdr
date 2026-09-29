@@ -17,6 +17,52 @@ use crate::layout::PaneInfo;
 use crate::popup_size::resolve_popup_geometry;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
+/// The palette entries that differ between a focused and an unfocused pane's chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PaneFocusColors {
+    pub(crate) accent: Color,
+    pub(crate) overlay0: Color,
+    pub(crate) overlay1: Color,
+    pub(crate) surface_dim: Color,
+}
+
+impl PaneFocusColors {
+    pub(crate) fn from_palette(palette: &Palette) -> Self {
+        Self {
+            accent: palette.accent,
+            overlay0: palette.overlay0,
+            overlay1: palette.overlay1,
+            surface_dim: palette.surface_dim,
+        }
+    }
+
+    pub(crate) fn border(&self, focused: bool) -> Color {
+        if focused {
+            self.accent
+        } else {
+            self.overlay0
+        }
+    }
+
+    pub(crate) fn title(&self, focused: bool) -> Style {
+        let style = Style::default().fg(self.border(focused));
+        if focused {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            style
+        }
+    }
+
+    /// Track color, thumb color and thumb symbol of a pane scrollbar.
+    pub(crate) fn scrollbar(&self, focused: bool) -> (Color, Color, &'static str) {
+        if focused {
+            (self.overlay0, self.overlay1, "▐")
+        } else {
+            (self.surface_dim, self.overlay0, "▕")
+        }
+    }
+}
+
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
     rt.scroll_metrics()
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
@@ -492,19 +538,16 @@ fn render_pane_borders(
         }
         let focused = pane_infos
             .iter()
-            .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
+            .any(|info| info.is_focused && line_touches_pane(x, y, info.rect, app.pane_gaps));
         let symbol = line_cell_symbol(line);
         if symbol.is_empty() {
             continue;
         }
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
-        let color = if focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
-        };
-        cell.set_style(Style::default().fg(color));
+        cell.set_style(
+            Style::default().fg(PaneFocusColors::from_palette(&app.palette).border(focused)),
+        );
     }
 
     render_pane_border_titles(app, ws, pane_infos, frame);
@@ -608,8 +651,8 @@ fn add_pane_border_cells(
     }
 }
 
-fn line_touches_pane(x: u16, y: u16, info: &PaneInfo, pane_gaps: bool) -> bool {
-    let rect = info.rect;
+/// Whether the border line cell at `(x, y)` takes the focus color of the pane at `rect`.
+pub(crate) fn line_touches_pane(x: u16, y: u16, rect: Rect, pane_gaps: bool) -> bool {
     if rect.width == 0 || rect.height == 0 {
         return false;
     }
@@ -666,23 +709,21 @@ fn render_pane_border_titles(
         if start_x >= end_x {
             continue;
         }
-        let color = if info.is_focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
-        };
-        let mut style = Style::default().fg(color);
-        if info.is_focused {
-            style = style.add_modifier(Modifier::BOLD);
-        }
         buf.set_stringn(
             start_x,
             y,
             title,
             end_x.saturating_sub(start_x) as usize,
-            style,
+            PaneFocusColors::from_palette(&app.palette).title(info.is_focused),
         );
     }
+}
+
+pub(crate) fn is_pane_border_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "┼" | "┤" | "├" | "┴" | "┬" | "│" | "─" | "┌" | "┐" | "└" | "┘"
+    )
 }
 
 fn line_cell_symbol(line: LineCell) -> &'static str {

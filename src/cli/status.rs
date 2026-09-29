@@ -298,6 +298,7 @@ fn client_status_json() -> ClientStatusJson {
         endpoint_capabilities: vec![
             crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY,
             crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY,
+            crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY,
             crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY,
         ],
         remote_host_bridge: true,

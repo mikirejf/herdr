@@ -370,8 +370,19 @@ impl ClientShellState {
             crate::api::schema::Method::PaneSplit(params) => params.focus,
             _ => false,
         };
+        let predicted_pane = match &method {
+            crate::api::schema::Method::PaneFocus(target)
+                if self.can_predict_pane_focus(&target.pane_id) =>
+            {
+                Some(target.pane_id.clone())
+            }
+            _ => None,
+        };
         if changes_focus {
             outcome.repaint |= self.pending_workspace_highlight.take().is_some();
+            if predicted_pane.is_none() {
+                outcome.repaint |= self.predicted_pane_focus.take().is_some();
+            }
         }
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             let label = self.active_endpoint_label().to_owned();
@@ -422,11 +433,19 @@ impl ClientShellState {
             endpoint_id: self.active_endpoint_id.clone(),
             boot_id: snapshot.boot_id.clone(),
             request: Box::new(crate::api::schema::Request {
-                id: request_id,
+                id: request_id.clone(),
                 method,
             }),
         });
+        if let Some(pane_id) = predicted_pane {
+            outcome.repaint |= self.predict_pane_focus(pane_id, request_id);
+        }
         true
+    }
+
+    /// Forgets a queued request the command lane replaced with a newer one of the same kind.
+    pub(crate) fn forget_superseded_request(&mut self, request_id: &str) {
+        self.pending_requests.remove(request_id);
     }
 
     pub(crate) fn receive_endpoint_error(&mut self, message: String) -> bool {
@@ -517,6 +536,20 @@ impl ClientShellState {
                 code: pending.method_name.clone(),
             };
             self.endpoint_notice_seen.remove(&timeout_key);
+        }
+        if let Some(predicted) = self
+            .predicted_pane_focus
+            .as_ref()
+            .filter(|predicted| predicted.request_id == request_id)
+        {
+            // An accepted request waits for the snapshot that shows its focus; clearing here
+            // would briefly show the old focus again.
+            let confirmed = self.snapshot.as_deref().is_some_and(|snapshot| {
+                snapshot.focused_pane_id.as_deref() == Some(predicted.pane_id.as_str())
+            });
+            if result.is_err() || confirmed {
+                self.predicted_pane_focus = None;
+            }
         }
         if let Err(error) = &result {
             if self
@@ -861,7 +894,7 @@ impl ClientShellState {
         let snapshot = self.snapshot.as_deref()?;
         let focused_workspace = snapshot.focused_workspace_id.clone()?;
         let focused_tab = snapshot.focused_tab_id.clone();
-        let focused_pane = snapshot.focused_pane_id.clone();
+        let focused_pane = self.focused_pane_id();
         let direction = |action| match action {
             KeybindAction::FocusPaneLeft
             | KeybindAction::SwapPaneLeft
@@ -896,9 +929,9 @@ impl ClientShellState {
                 if agents.is_empty() {
                     return None;
                 }
-                let current = agents.iter().position(|pane_id| {
-                    Some(pane_id.as_str()) == snapshot.focused_pane_id.as_deref()
-                });
+                let current = agents
+                    .iter()
+                    .position(|pane_id| Some(pane_id) == focused_pane.as_ref());
                 let next = match (current, action) {
                     (Some(current), KeybindAction::PreviousAgent) => {
                         (current + agents.len() - 1) % agents.len()
@@ -1020,10 +1053,18 @@ impl ClientShellState {
             | KeybindAction::FocusPaneDown
             | KeybindAction::FocusPaneUp
             | KeybindAction::FocusPaneRight => {
-                Some(Method::PaneFocusDirection(PaneFocusDirectionParams {
-                    pane_id: focused_pane,
-                    direction: direction(action)?,
-                }))
+                let direction = direction(action)?;
+                match focused_pane
+                    .as_deref()
+                    .and_then(|source| self.surface_pane_in_direction(source, direction))
+                {
+                    // Naming the target lets the shell show the new focus before the reply.
+                    Some(target) => Some(Method::PaneFocus(PaneTarget { pane_id: target? })),
+                    None => Some(Method::PaneFocusDirection(PaneFocusDirectionParams {
+                        pane_id: focused_pane,
+                        direction,
+                    })),
+                }
             }
             KeybindAction::SwapPaneLeft
             | KeybindAction::SwapPaneDown

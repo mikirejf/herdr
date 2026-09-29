@@ -24,6 +24,9 @@ pub const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
 /// The server answers `client_shell.surface.set(true)` with its mouse mode, keyboard mode and
 /// window title ahead of the frame, so a switch commits in one round trip.
 pub const SURFACE_ACTIVATION_EFFECTS_CAPABILITY: &str = "surface_activation_effects";
+/// Every snapshot carries `pane_focus_style`, so the client can show a pane focus change in the
+/// surface it already holds before the server confirms it.
+pub const PANE_FOCUS_STYLE_CAPABILITY: &str = "pane_focus_style";
 /// Client-to-server request for a complete pane surface after the client could not apply a
 /// patch. Servers without it ignore the unknown control; the client then waits for the next
 /// complete surface as before.
@@ -175,6 +178,7 @@ impl EndpointServerWelcome {
                 super::surface_scroll::CAPABILITY.into(),
                 SURFACE_INTEREST_CAPABILITY.into(),
                 SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
+                PANE_FOCUS_STYLE_CAPABILITY.into(),
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
@@ -251,6 +255,7 @@ mod tests {
             panes: Vec::new(),
             agents: Vec::new(),
             commands: Vec::new(),
+            pane_focus_style: None,
         }
     }
 
@@ -386,6 +391,7 @@ mod tests {
                 super::super::surface_scroll::CAPABILITY.to_string(),
                 SURFACE_INTEREST_CAPABILITY.to_string(),
                 SURFACE_ACTIVATION_EFFECTS_CAPABILITY.to_string(),
+                PANE_FOCUS_STYLE_CAPABILITY.to_string(),
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),

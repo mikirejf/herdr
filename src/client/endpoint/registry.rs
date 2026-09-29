@@ -51,6 +51,7 @@ impl EndpointNegotiation {
             && self.supports_capability(
                 crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY,
             )
+            && self.supports_capability(crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY)
             && self.supports_method("client_shell.surface.set")
     }
 
@@ -415,6 +416,7 @@ mod tests {
             vec![
                 crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
                 crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
+                crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY.into(),
                 crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY.into(),
             ],
         )

@@ -38,6 +38,7 @@ fn negotiation() -> super::super::EndpointNegotiation {
         vec![
             crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
             crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
+            crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY.into(),
         ],
     )
 }
@@ -67,6 +68,7 @@ fn test_snapshot(boot_id: &str, revision: u64) -> crate::protocol::ClientShellSn
         panes: Vec::new(),
         agents: Vec::new(),
         commands: Vec::new(),
+        pane_focus_style: None,
     }
 }
 
@@ -432,6 +434,7 @@ fn activation_requires_an_exact_snapshot_surface_revision_pair() {
         panes: Vec::new(),
         agents: Vec::new(),
         commands: Vec::new(),
+        pane_focus_style: None,
     };
     assert_eq!(
         activation.receive_snapshot(&target, 7, &snapshot),

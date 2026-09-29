@@ -263,6 +263,10 @@ pub(super) fn snapshot_with_completions(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
+        pane_focus_style: Some(protocol::ClientShellPaneFocusStyle::new(
+            crate::ui::PaneFocusColors::from_palette(&app.state.palette),
+            app.state.pane_gaps,
+        )),
     };
     (shell, completions)
 }

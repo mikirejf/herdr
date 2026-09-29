@@ -971,6 +971,42 @@ pub struct ClientShellSnapshot {
     pub panes: Vec<ClientShellPane>,
     pub agents: Vec<ClientShellAgent>,
     pub commands: Vec<ClientShellCommand>,
+    /// Lets the client move pane focus chrome in a surface it already holds, so a local
+    /// focus change is visible before the endpoint renders the next surface.
+    #[serde(default)]
+    pub pane_focus_style: Option<ClientShellPaneFocusStyle>,
+}
+
+/// The endpoint facts that decide how pane focus is drawn into its pane surfaces. Colors use
+/// the packed `CellData` encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellPaneFocusStyle {
+    pub pane_gaps: bool,
+    pub accent: u32,
+    pub overlay0: u32,
+    pub overlay1: u32,
+    pub surface_dim: u32,
+}
+
+impl ClientShellPaneFocusStyle {
+    pub(crate) fn new(colors: crate::ui::PaneFocusColors, pane_gaps: bool) -> Self {
+        Self {
+            pane_gaps,
+            accent: color_to_u32(colors.accent),
+            overlay0: color_to_u32(colors.overlay0),
+            overlay1: color_to_u32(colors.overlay1),
+            surface_dim: color_to_u32(colors.surface_dim),
+        }
+    }
+
+    pub(crate) fn colors(&self) -> crate::ui::PaneFocusColors {
+        crate::ui::PaneFocusColors {
+            accent: u32_to_color(self.accent),
+            overlay0: u32_to_color(self.overlay0),
+            overlay1: u32_to_color(self.overlay1),
+            surface_dim: u32_to_color(self.surface_dim),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2889,6 +2925,13 @@ mod tests {
                 action: ClientShellCommandAction::Shell,
                 description: Some("deploy".into()),
             }],
+            pane_focus_style: Some(ClientShellPaneFocusStyle {
+                pane_gaps: true,
+                accent: 0x02_89_b4_fa,
+                overlay0: 0x02_6c_70_86,
+                overlay1: 0x02_7f_84_9c,
+                surface_dim: 0x02_18_18_25,
+            }),
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

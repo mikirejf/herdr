@@ -889,18 +889,14 @@ impl ClientShellState {
     }
 
     fn cycle_pane(&mut self, reverse: bool, outcome: &mut ClientShellInput) {
-        let Some(snapshot) = self.snapshot.as_deref() else {
-            return;
-        };
         let Some(surface) = self.pane_surface.as_ref() else {
             return;
         };
         if surface.panes.is_empty() {
             return;
         }
-        let current = snapshot
-            .focused_pane_id
-            .as_deref()
+        let current = self
+            .focused_pane_id()
             .and_then(|focused| {
                 surface
                     .panes
@@ -964,12 +960,6 @@ impl ClientShellState {
                 .as_ref()
                 .is_some_and(crate::selection::Selection::is_visible),
         }
-    }
-
-    pub(super) fn focused_pane_id(&self) -> Option<String> {
-        self.snapshot
-            .as_deref()
-            .and_then(|snapshot| snapshot.focused_pane_id.clone())
     }
 
     pub(crate) fn clipboard_image_target(

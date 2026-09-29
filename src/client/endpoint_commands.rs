@@ -3,7 +3,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crate::api::client::ApiClientError;
-use crate::api::schema::{Request, ResponseResult};
+use crate::api::schema::{Method, Request, ResponseResult};
 use crate::protocol::ClientMessage;
 
 use super::endpoint::{ClientEndpointId, EndpointRegistry, EndpointSendOutcome};
@@ -69,22 +69,33 @@ pub(super) struct EndpointCommands {
 }
 
 impl EndpointCommands {
+    /// Queues `request` and returns the ID of a queued request it replaced. A pane focus that
+    /// has not been sent yet is replaced by a newer one queued right behind it, so a burst of
+    /// focus changes costs the request in flight plus one for the latest target.
     pub(super) fn enqueue(
         &mut self,
         endpoint_id: ClientEndpointId,
         generation: u64,
         boot_id: String,
         request: Box<Request>,
-    ) {
-        self.lanes
-            .entry(endpoint_id)
-            .or_default()
-            .queued
-            .push_back(QueuedCommand {
-                generation,
-                boot_id,
-                request,
+    ) -> Option<String> {
+        let queued = &mut self.lanes.entry(endpoint_id).or_default().queued;
+        let supersedes = matches!(request.method, Method::PaneFocus(_))
+            && queued.back().is_some_and(|last| {
+                last.generation == generation
+                    && last.boot_id == boot_id
+                    && matches!(last.request.method, Method::PaneFocus(_))
             });
+        let superseded = supersedes
+            .then(|| queued.pop_back())
+            .flatten()
+            .map(|command| command.request.id);
+        queued.push_back(QueuedCommand {
+            generation,
+            boot_id,
+            request,
+        });
+        superseded
     }
 
     pub(super) fn send_next(

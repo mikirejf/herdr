@@ -343,7 +343,12 @@ impl ClientShellState {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
-        blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        let predicted_surface_frame = self.predicted_pane_surface_frame(surface);
+        blit_pane_surface(
+            &mut frame,
+            predicted_surface_frame.as_ref().unwrap_or(&surface.frame),
+            layout.pane_surface,
+        );
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         let has_selection = self

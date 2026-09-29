@@ -23,6 +23,7 @@ fn lifecycle_negotiation() -> EndpointNegotiation {
         vec![
             crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
             crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
+            crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY.into(),
         ],
     )
 }

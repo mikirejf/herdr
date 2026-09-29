@@ -27,6 +27,8 @@ mod mouse;
 mod notification_policy;
 mod notifications;
 mod overlay_input;
+mod pane_focus;
+use pane_focus::PredictedPaneFocus;
 mod preferences;
 mod render;
 mod scroll;
