@@ -2202,7 +2202,9 @@ impl HeadlessServer {
                 }
                 client.pixel_mouse = pixel_mouse && observed.is_known();
                 if !client.shell_surface_active {
-                    return false;
+                    // A background surface follows the new size on the next render, but only a
+                    // presented surface may move the tab's PTY geometry.
+                    return client.shell_surface_background;
                 }
                 client.request_repaint();
                 self.promote_client_to_foreground(client_id);
@@ -2291,11 +2293,30 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     return false;
                 };
-                if !client.is_active_shell_client() {
+                if !client.streams_shell_surface() {
                     return false;
                 }
                 debug!(client_id, "client shell requested a complete pane surface");
                 client.request_repaint();
+                true
+            }
+            ServerEvent::ClientShellSurfaceBackground { client_id } => {
+                if !self.move_client_shell_surface_to_background(client_id) {
+                    return false;
+                }
+                // The client holds these for the moment it shows this surface again.
+                self.stream_host_mouse_capture_mode();
+                self.stream_direct_terminal_keyboard_mode();
+                true
+            }
+            ServerEvent::ClientShellSurfaceForeground { client_id } => {
+                if !self.bring_client_shell_surface_to_foreground(client_id) {
+                    return false;
+                }
+                // A kept stream already carries current modes, so only a fresh epoch sends any.
+                self.stream_host_mouse_capture_mode();
+                self.stream_direct_terminal_keyboard_mode();
+                self.sync_window_title();
                 true
             }
             ServerEvent::ClientShellPaneInput {

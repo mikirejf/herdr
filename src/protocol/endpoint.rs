@@ -31,6 +31,17 @@ pub const PANE_FOCUS_STYLE_CAPABILITY: &str = "pane_focus_style";
 /// patch. Servers without it ignore the unknown control; the client then waits for the next
 /// complete surface as before.
 pub const SURFACE_RESYNC_KIND: &str = "endpoint.surface.resync.v1";
+/// The server accepts `SURFACE_BACKGROUND_KIND` and `SURFACE_FOREGROUND_KIND`, so a client can
+/// keep an endpoint's surface current while it shows another endpoint and show it again without
+/// waiting for the server.
+pub const SURFACE_BACKGROUND_CAPABILITY: &str = "surface_background";
+/// Client-to-server: give up the presentation lease (foreground, tab geometry, pane focus and
+/// input) but keep streaming snapshots, pane surfaces, patches and host modes from the current
+/// baseline.
+pub const SURFACE_BACKGROUND_KIND: &str = "endpoint.surface.background.v1";
+/// Client-to-server: take the presentation lease back for a background surface without starting a
+/// new projection epoch, so the surface the client already holds stays the baseline.
+pub const SURFACE_FOREGROUND_KIND: &str = "endpoint.surface.foreground.v1";
 pub const HEALTH_CHECK_CAPABILITY: &str = "health_check";
 pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
@@ -179,6 +190,7 @@ impl EndpointServerWelcome {
                 SURFACE_INTEREST_CAPABILITY.into(),
                 SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
                 PANE_FOCUS_STYLE_CAPABILITY.into(),
+                SURFACE_BACKGROUND_CAPABILITY.into(),
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
@@ -392,6 +404,7 @@ mod tests {
                 SURFACE_INTEREST_CAPABILITY.to_string(),
                 SURFACE_ACTIVATION_EFFECTS_CAPABILITY.to_string(),
                 PANE_FOCUS_STYLE_CAPABILITY.to_string(),
+                SURFACE_BACKGROUND_CAPABILITY.to_string(),
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),

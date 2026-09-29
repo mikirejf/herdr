@@ -24,6 +24,7 @@ fn lifecycle_negotiation() -> EndpointNegotiation {
             crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
             crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
             crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY.into(),
+            crate::protocol::endpoint::SURFACE_BACKGROUND_CAPABILITY.into(),
         ],
     )
 }
@@ -478,6 +479,23 @@ fn dispatch_lifecycle_messages(
                     request: Box::new(serde_json::from_str(&request).unwrap()),
                 }
             }
+            crate::protocol::ClientMessage::ClientShellPaneInput { pane_id, events } => {
+                ServerEvent::ClientShellPaneInput {
+                    client_id,
+                    pane_id,
+                    events,
+                }
+            }
+            crate::protocol::ClientMessage::EndpointControl { kind, .. }
+                if kind == crate::protocol::endpoint::SURFACE_BACKGROUND_KIND =>
+            {
+                ServerEvent::ClientShellSurfaceBackground { client_id }
+            }
+            crate::protocol::ClientMessage::EndpointControl { kind, .. }
+                if kind == crate::protocol::endpoint::SURFACE_FOREGROUND_KIND =>
+            {
+                ServerEvent::ClientShellSurfaceForeground { client_id }
+            }
             other => panic!("unhandled lifecycle message: {other:?}"),
         };
         server.handle_server_event(event);
@@ -717,7 +735,7 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
     assert!(shell.endpoint_is_active(&target_id));
 
     target_sent.lock().unwrap().clear();
-    let mut returning = crate::client::endpoint::PendingEndpointActivation::begin(
+    let _returning = crate::client::endpoint::PendingEndpointActivation::begin(
         &shell,
         &mut endpoints,
         ClientEndpointId::Local,
@@ -732,15 +750,9 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
         target_client_id,
         std::mem::take(&mut *target_sent.lock().unwrap()),
     );
-    loop {
-        if let ServerMessage::ClientShellEndpointResponseChunk {
-            request_id, data, ..
-        } = read_server_message(target_control.recv().unwrap())
-        {
-            returning.receive_response(&target_id, 7, &request_id, &data, &mut endpoints);
-            break;
-        }
-    }
+    // The remote keeps streaming to this client, and the client keeps following it.
+    assert!(target_server.clients[&target_client_id].shell_surface_background);
+    assert!(endpoints.background_surface(&target_id).is_some());
     dispatch_lifecycle_messages(
         &mut source_server,
         source_client_id,
@@ -807,4 +819,497 @@ async fn surface_resync_sends_a_complete_surface_to_the_active_shell() {
         other => panic!("expected a complete pane surface, got {other:?}"),
     }
     shutdown_test_runtimes(&mut server);
+}
+
+/// One client connection as the real transport sees it: the test writer forwards on its own
+/// thread, and surface deltas are decoded against the last surface, like `client::transport`.
+struct TestShellConnection {
+    control: std::sync::mpsc::Receiver<Vec<u8>>,
+    render: std::sync::mpsc::Receiver<Vec<u8>>,
+    decoder: crate::protocol::surface_reuse::Decoder,
+}
+
+impl TestShellConnection {
+    /// Every message the server has queued so far, in order per channel.
+    fn drain(&mut self) -> (Vec<ServerMessage>, Vec<ServerMessage>) {
+        let (mut control, mut render) = (Vec::new(), Vec::new());
+        let mut quiet_since = std::time::Instant::now();
+        while quiet_since.elapsed() < Duration::from_millis(100) {
+            let mut received = false;
+            while let Ok(framed) = self.control.try_recv() {
+                control.push(read_server_message(framed));
+                received = true;
+            }
+            while let Ok(framed) = self.render.try_recv() {
+                render.push(self.decoder.decode(read_server_message(framed)).unwrap());
+                received = true;
+            }
+            if received {
+                quiet_since = std::time::Instant::now();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        (control, render)
+    }
+}
+
+fn connect_presenting_shell(
+    server: &mut HeadlessServer,
+    client_id: u64,
+) -> (TestShellConnection, crate::protocol::PaneSurfaceFrame) {
+    let (writer, control, render) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: true,
+            surface_scroll: false,
+            client_id,
+            surface_cols: 80,
+            surface_rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: true,
+            mouse_capture: true,
+            surface_active: true,
+            writer,
+        })
+    );
+    let mut connection = TestShellConnection {
+        control,
+        render,
+        decoder: crate::protocol::surface_reuse::Decoder::new(true, false),
+    };
+    assert!(server.handle_server_event(ServerEvent::ClientShellFocus {
+        client_id,
+        focused: true,
+    }));
+    server.render_and_stream();
+    let surface = connection
+        .drain()
+        .1
+        .into_iter()
+        .rev()
+        .find_map(|message| match message {
+            ServerMessage::PaneSurface(surface) => Some(surface),
+            _ => None,
+        })
+        .expect("presented surface");
+    (connection, surface)
+}
+
+fn write_focused_test_pane(server: &mut HeadlessServer, bytes: &[u8]) -> crate::layout::PaneId {
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .expect("focused pane runtime")
+        .test_process_pty_bytes(bytes);
+    pane_id
+}
+
+fn paste(pane_id: &str, text: &str) -> ServerEvent {
+    ServerEvent::ClientShellPaneInput {
+        client_id: 7,
+        pane_id: pane_id.into(),
+        events: vec![crate::protocol::ClientPaneInputEvent::Paste(text.into())],
+    }
+}
+
+/// Surfaces a client receives after taking the lease back. A complete surface that repeats the
+/// held projection and frame is the lost-baseline repaint this design must avoid; a recompute of
+/// the same frame decodes to an equal one.
+fn assert_no_repaint_of(held: &crate::protocol::PaneSurfaceFrame, messages: &[ServerMessage]) {
+    for message in messages {
+        match message {
+            ServerMessage::PaneSurfacePatch(patch) => {
+                assert_eq!(patch.projection_revision, held.projection_revision);
+                assert!(patch.base_surface_revision >= held.surface_revision);
+            }
+            ServerMessage::PaneSurface(surface)
+                if surface.projection_revision == held.projection_revision =>
+            {
+                assert!(surface.surface_revision > held.surface_revision);
+                assert_eq!(
+                    surface.frame, held.frame,
+                    "taking the lease back must not change the held frame"
+                );
+            }
+            ServerMessage::PaneSurface(_) => {}
+            other => panic!("unexpected render message: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn background_surface_streams_without_the_presentation_lease() {
+    let mut server = test_headless_server();
+    let mut input_rx = install_focused_test_runtime(&mut server, b"BASE");
+    let (mut connection, presented) = connect_presenting_shell(&mut server, 7);
+    let tab_id = server.shell_tab_id_for_client(7).expect("shell tab");
+    assert_eq!(server.tab_geometry_controllers.get(&tab_id), Some(&7));
+    assert!(server.handle_server_event(ServerEvent::ClientShellFocus {
+        client_id: 7,
+        focused: false,
+    }));
+    server.render_and_stream();
+    connection.drain();
+    let runtime_pane_id = write_focused_test_pane(&mut server, b"");
+    let pane_size = server.app.state.workspaces[0].test_runtimes[&runtime_pane_id].current_size();
+    let baseline = server.clients[&7]
+        .render_state
+        .last_pane_surface()
+        .expect("baseline")
+        .clone();
+
+    assert!(server.handle_server_event(ServerEvent::ClientShellSurfaceBackground { client_id: 7 }));
+
+    let client = &server.clients[&7];
+    assert!(!client.shell_surface_active);
+    assert!(client.shell_surface_background);
+    assert_eq!(server.foreground_client_id, None);
+    assert_eq!(server.tab_geometry_controllers.get(&tab_id), None);
+    assert_eq!(
+        client.render_state.last_pane_surface(),
+        Some(&baseline),
+        "the stream keeps its baseline"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&runtime_pane_id].current_size(),
+        pane_size
+    );
+    let (modes, _) = connection.drain();
+    assert!(
+        modes
+            .iter()
+            .any(|message| matches!(message, ServerMessage::MouseCapture { enabled: true, .. })),
+        "the client needs the modes it will present with: {modes:?}"
+    );
+    assert!(modes
+        .iter()
+        .any(|message| matches!(message, ServerMessage::ClientShellKeyboardReportAll { .. })));
+
+    assert!(!server.handle_server_event(paste(&presented.panes[0].pane_id, "blocked")));
+    assert!(input_rx.try_recv().is_err());
+    assert!(!server.handle_server_event(ServerEvent::ClientShellFocus {
+        client_id: 7,
+        focused: true,
+    }));
+
+    write_focused_test_pane(&mut server, b"\rHIDDEN");
+    assert!(
+        server.render_retained_pane_surface_and_stream(&std::collections::HashSet::from([
+            runtime_pane_id
+        ]))
+    );
+    match connection.drain().1.as_slice() {
+        [ServerMessage::PaneSurfacePatch(patch)] => {
+            assert_eq!(patch.projection_revision, baseline.projection_revision);
+            assert_eq!(patch.base_surface_revision, baseline.surface_revision);
+        }
+        other => panic!("expected one patch on the kept baseline, got {other:?}"),
+    }
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn foreground_resumes_the_background_baseline() {
+    let mut server = test_headless_server();
+    let mut input_rx = install_focused_test_runtime(&mut server, b"BASE");
+    let (mut connection, presented) = connect_presenting_shell(&mut server, 7);
+    let tab_id = server.shell_tab_id_for_client(7).expect("shell tab");
+    assert!(server.handle_server_event(ServerEvent::ClientShellSurfaceBackground { client_id: 7 }));
+    write_focused_test_pane(&mut server, b"\rHIDDEN");
+    server.render_and_stream();
+    connection.drain();
+    let projection_revision = server.clients[&7].shell_projection_revision;
+    let held = server.clients[&7]
+        .render_state
+        .last_pane_surface()
+        .expect("background baseline")
+        .clone();
+    assert!(frame_text(&held.frame).contains("HIDDEN"));
+
+    assert!(server.handle_server_event(ServerEvent::ClientShellSurfaceForeground { client_id: 7 }));
+
+    let client = &server.clients[&7];
+    assert!(client.shell_surface_active);
+    assert!(!client.shell_surface_background);
+    assert_eq!(client.shell_projection_revision, projection_revision);
+    assert_eq!(client.render_state.last_pane_surface(), Some(&held));
+    assert_eq!(server.foreground_client_id, Some(7));
+    assert_eq!(server.tab_geometry_controllers.get(&tab_id), Some(&7));
+    server.render_and_stream();
+    assert_no_repaint_of(&held, &connection.drain().1);
+
+    write_focused_test_pane(&mut server, b"\rSHOWN");
+    server.render_and_stream();
+    let shown = connection.drain().1;
+    assert!(
+        shown.iter().any(|message| matches!(
+            message,
+            ServerMessage::PaneSurfacePatch(_) | ServerMessage::PaneSurface(_)
+        )),
+        "the stream continues after the lease comes back"
+    );
+    server.handle_server_event(paste(&presented.panes[0].pane_id, "typed"));
+    let input = input_rx.try_recv().expect("pane input after foreground");
+    assert!(String::from_utf8_lossy(&input).contains("typed"));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn surface_set_inactive_ends_a_background_stream() {
+    let mut server = test_headless_server();
+    let _input_rx = install_focused_test_runtime(&mut server, b"BASE");
+    let (mut connection, _) = connect_presenting_shell(&mut server, 7);
+    assert!(server.handle_server_event(ServerEvent::ClientShellSurfaceBackground { client_id: 7 }));
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellSurfaceBackground { client_id: 7 }),
+        "only a presented surface moves to the background"
+    );
+    let boot_id = server.client_shell_boot_id.clone();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id: 7,
+            boot_id,
+            request: Box::new(api::schema::Request {
+                id: "off".into(),
+                method: api::schema::Method::ClientShellSurfaceSet(
+                    api::schema::ClientShellSurfaceSetParams { active: false },
+                ),
+            }),
+        })
+    );
+    connection.drain();
+    assert!(!server.clients[&7].shell_surface_background);
+    assert!(server.clients[&7]
+        .render_state
+        .last_pane_surface()
+        .is_none());
+    write_focused_test_pane(&mut server, b"\rGONE");
+    server.render_and_stream();
+    assert!(connection.drain().1.is_empty());
+    shutdown_test_runtimes(&mut server);
+}
+
+/// Route one remote message the way the client event loop does for a background endpoint.
+fn route_remote_message(
+    shell: &mut crate::client::ClientShellState,
+    endpoints: &mut EndpointRegistry,
+    remote_id: &ClientEndpointId,
+    message: ServerMessage,
+) {
+    let Some(message) = endpoints.follow_background_surface(remote_id, 9, Box::new(message)) else {
+        return;
+    };
+    if let ServerMessage::EndpointControl { kind, data } = *message {
+        if let Ok(crate::client::endpoint::EndpointControlMessage::Snapshot(snapshot)) =
+            crate::client::endpoint::decode_endpoint_control(&kind, &data)
+        {
+            shell.cache_endpoint_snapshot_inactive_for_generation(remote_id, 9, snapshot);
+        }
+    }
+}
+
+/// A remote the client left keeps streaming. Switching back presents that stream at once, and the
+/// remote then continues from the very surface the client shows.
+#[tokio::test]
+async fn two_headless_servers_return_to_a_background_remote_without_a_round_trip() {
+    let mut local_server = test_headless_server();
+    let _local_input = install_focused_test_runtime(&mut local_server, b"local");
+    let (local_writer, local_control, local_render) = test_client_writer();
+    assert!(
+        local_server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            client_id: 7,
+            surface_cols: 80,
+            surface_rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: true,
+            mouse_capture: true,
+            surface_active: false,
+            writer: local_writer,
+        })
+    );
+    let local_snapshot = client_shell_snapshot(&local_control);
+
+    let mut remote_server = test_headless_server();
+    let mut remote_input = install_focused_test_runtime(&mut remote_server, b"remote");
+    let (mut remote, remote_surface) = connect_presenting_shell(&mut remote_server, 7);
+    let remote_snapshot = remote_server.clients[&7]
+        .shell_snapshot
+        .clone()
+        .expect("remote snapshot");
+    assert_eq!(remote_snapshot.revision, remote_surface.projection_revision);
+
+    let profile = SavedSshEndpoint {
+        id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        label: "Remote".into(),
+        target: "dev@example.com".into(),
+        session: "main".into(),
+        enabled: true,
+    };
+    let remote_id = ClientEndpointId::Ssh(profile.id.clone());
+    let mut shell = crate::client::ClientShellState::new(
+        crate::client::ClientShellConfig::from_config(&crate::config::Config::default()),
+    );
+    shell.set_endpoint_catalog(&[profile]);
+    shell.set_snapshot(local_snapshot);
+    shell.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
+    shell.set_endpoint_snapshot_for_generation(&remote_id, 9, Box::new(remote_snapshot));
+    assert!(shell.activate_endpoint_projection(&remote_id));
+    shell.set_pane_surface(remote_surface.clone());
+
+    let local_sent = Arc::new(Mutex::new(Vec::new()));
+    let remote_sent = Arc::new(Mutex::new(Vec::new()));
+    let mut endpoints = EndpointRegistry::new(
+        CapturingEndpointTransport(local_sent.clone()),
+        1,
+        lifecycle_negotiation(),
+    );
+    endpoints.set_surface_active(&ClientEndpointId::Local, false);
+    endpoints.insert(
+        remote_id.clone(),
+        CapturingEndpointTransport(remote_sent.clone()),
+        9,
+        lifecycle_negotiation(),
+        true,
+    );
+    assert!(endpoints.set_active(&remote_id));
+
+    // Leave the remote for Local through the ordinary handoff.
+    let mut to_local = crate::client::endpoint::PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        ClientEndpointId::Local,
+        None,
+        lifecycle_resize(),
+        41,
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    dispatch_lifecycle_messages(
+        &mut remote_server,
+        7,
+        std::mem::take(&mut *remote_sent.lock().unwrap()),
+    );
+    assert!(remote_server.clients[&7].shell_surface_background);
+    dispatch_lifecycle_messages(
+        &mut local_server,
+        7,
+        std::mem::take(&mut *local_sent.lock().unwrap()),
+    );
+    while let Ok(framed) = local_control.recv_timeout(Duration::from_millis(200)) {
+        match read_server_message(framed) {
+            ServerMessage::ClientShellEndpointResponseChunk {
+                request_id, data, ..
+            } => {
+                to_local.receive_response(
+                    &ClientEndpointId::Local,
+                    1,
+                    &request_id,
+                    &data,
+                    &mut endpoints,
+                );
+            }
+            effect => to_local.receive_presentation_effect(&ClientEndpointId::Local, 1, effect),
+        }
+    }
+    local_server.render_and_stream();
+    let snapshot = client_shell_snapshot(&local_control);
+    to_local.receive_snapshot(&ClientEndpointId::Local, 1, &snapshot);
+    shell.cache_endpoint_snapshot_inactive_for_generation(&ClientEndpointId::Local, 1, snapshot);
+    let ServerMessage::PaneSurface(local_surface) =
+        read_server_message(local_render.recv().expect("local surface"))
+    else {
+        panic!("expected local pane surface");
+    };
+    assert_eq!(
+        to_local.receive_surface(&ClientEndpointId::Local, 1, local_surface),
+        crate::client::endpoint::SurfaceActivationProgress::Ready
+    );
+    to_local.complete(&mut shell, &mut endpoints).unwrap();
+    endpoints.unfreeze_input();
+    assert_eq!(endpoints.active_id(), &ClientEndpointId::Local);
+
+    // The hidden remote changes; the client follows its stream.
+    write_focused_test_pane(&mut remote_server, b"\rWHILE-AWAY");
+    remote_server.render_and_stream();
+    let (control, render) = remote.drain();
+    for message in control.into_iter().chain(render) {
+        route_remote_message(&mut shell, &mut endpoints, &remote_id, message);
+    }
+    local_sent.lock().unwrap().clear();
+
+    // Switching back commits before the remote hears anything.
+    let committed = crate::client::endpoint::present_background_surface(
+        &mut shell,
+        &mut endpoints,
+        &remote_id,
+        None,
+        &lifecycle_resize(),
+        42,
+    )
+    .expect("the followed remote surface commits at once");
+    assert_eq!(endpoints.active_id(), &remote_id);
+    let server_surface = remote_server.clients[&7]
+        .render_state
+        .last_pane_surface()
+        .expect("remote baseline")
+        .clone();
+    let shown = shell
+        .followed_pane_surface()
+        .expect("shown surface")
+        .clone();
+    assert_eq!(
+        shown, server_surface,
+        "the client shows the remote's latest frame"
+    );
+    assert!(frame_text(&shown.frame).contains("WHILE-AWAY"));
+    assert!(committed
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, ServerMessage::MouseCapture { enabled: true, .. })));
+
+    // The remote takes the lease back on the same baseline.
+    dispatch_lifecycle_messages(
+        &mut remote_server,
+        7,
+        std::mem::take(&mut *remote_sent.lock().unwrap()),
+    );
+    dispatch_lifecycle_messages(
+        &mut local_server,
+        7,
+        std::mem::take(&mut *local_sent.lock().unwrap()),
+    );
+    assert!(remote_server.clients[&7].shell_surface_active);
+    assert_eq!(remote_server.foreground_client_id, Some(7));
+    assert_eq!(remote_server.clients[&7].outer_terminal_focus, Some(true));
+    assert!(!local_server.clients[&7].shell_surface_active);
+    remote_server.render_and_stream();
+    assert_no_repaint_of(&shown, &remote.drain().1);
+
+    // Keys typed right after the switch reach the remote pane.
+    endpoints.send(&crate::protocol::ClientMessage::ClientShellPaneInput {
+        pane_id: shown.panes[0].pane_id.clone(),
+        events: vec![crate::protocol::ClientPaneInputEvent::Paste("after".into())],
+    });
+    dispatch_lifecycle_messages(
+        &mut remote_server,
+        7,
+        std::mem::take(&mut *remote_sent.lock().unwrap()),
+    );
+    let input = remote_input.try_recv().expect("remote pane input");
+    assert!(String::from_utf8_lossy(&input).contains("after"));
+    shutdown_test_runtimes(&mut local_server);
+    shutdown_test_runtimes(&mut remote_server);
 }

@@ -522,6 +522,10 @@ pub(crate) enum ServerEvent {
     ClientShellMouseCapture { client_id: u64, enabled: bool },
     /// A client-owned shell could not apply a surface patch and needs a complete surface.
     ClientShellSurfaceResync { client_id: u64 },
+    /// A client-owned shell stopped presenting its surface but keeps following it.
+    ClientShellSurfaceBackground { client_id: u64 },
+    /// A client-owned shell presents the surface it kept following in the background.
+    ClientShellSurfaceForeground { client_id: u64 },
     /// A client-owned shell invoked one endpoint operation through this connection.
     ClientShellEndpointRequest {
         client_id: u64,
@@ -1342,6 +1346,16 @@ fn client_read_loop_with_endpoint_controls(
                 if kind == crate::protocol::endpoint::SURFACE_RESYNC_KIND =>
             {
                 ServerEvent::ClientShellSurfaceResync { client_id }
+            }
+            ClientMessage::EndpointControl { kind, .. }
+                if kind == crate::protocol::endpoint::SURFACE_BACKGROUND_KIND =>
+            {
+                ServerEvent::ClientShellSurfaceBackground { client_id }
+            }
+            ClientMessage::EndpointControl { kind, .. }
+                if kind == crate::protocol::endpoint::SURFACE_FOREGROUND_KIND =>
+            {
+                ServerEvent::ClientShellSurfaceForeground { client_id }
             }
             ClientMessage::EndpointControl { kind, data } => {
                 let Some(response) = crate::server::client_endpoint_control::response(&kind, data)

@@ -120,6 +120,8 @@ pub(super) fn send_surface_activation(
     resize: &crate::protocol::ClientMessage,
     focused: bool,
 ) -> Result<(), String> {
+    // surface.set(true) starts a new projection epoch, which replaces any background stream.
+    endpoints.set_background_surface(&target.endpoint_id, None);
     if endpoints.send_to(&target.endpoint_id, resize) != EndpointSendOutcome::Sent {
         return Err("endpoint resize could not be sent".into());
     }

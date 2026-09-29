@@ -3,7 +3,7 @@ use std::io;
 use std::time::Instant;
 
 use super::health::{EndpointHealth, HealthAction};
-use super::ClientEndpointId;
+use super::{BackgroundDelivery, BackgroundSurface, ClientEndpointId};
 use crate::protocol::ClientMessage;
 
 pub(crate) trait EndpointTransport: Send {
@@ -52,6 +52,7 @@ impl EndpointNegotiation {
                 crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY,
             )
             && self.supports_capability(crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY)
+            && self.supports_capability(crate::protocol::endpoint::SURFACE_BACKGROUND_CAPABILITY)
             && self.supports_method("client_shell.surface.set")
     }
 
@@ -67,6 +68,8 @@ pub(crate) struct EndpointConnection {
     pub(crate) negotiation: EndpointNegotiation,
     health: Option<EndpointHealth>,
     surface_resync_requested: bool,
+    /// Present only while this connection streams its surface without the presentation lease.
+    background: Option<BackgroundSurface>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +168,7 @@ impl EndpointRegistry {
                 negotiation,
                 health,
                 surface_resync_requested: false,
+                background: None,
             },
         ) {
             previous.transport.disconnect();
@@ -265,6 +269,59 @@ impl EndpointRegistry {
         let changed = connection.surface_active != active;
         connection.surface_active = active;
         changed
+    }
+
+    pub(crate) fn background_surface(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<&BackgroundSurface> {
+        self.connections.get(endpoint_id)?.background.as_ref()
+    }
+
+    /// Start or stop following an endpoint's background stream. Any lifecycle message that changes
+    /// the endpoint's lease also decides this, on the same ordered connection.
+    pub(crate) fn set_background_surface(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        background: Option<BackgroundSurface>,
+    ) {
+        if let Some(connection) = self.connections.get_mut(endpoint_id) {
+            connection.background = background;
+        }
+    }
+
+    /// Hand a message to the endpoint's background surface, if it streams one. Returns the
+    /// message when it still needs the usual routing.
+    pub(crate) fn follow_background_surface(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        message: Box<crate::protocol::ServerMessage>,
+    ) -> Option<Box<crate::protocol::ServerMessage>> {
+        let Some(connection) = self
+            .connections
+            .get_mut(endpoint_id)
+            .filter(|connection| connection.generation == generation)
+        else {
+            return Some(message);
+        };
+        let Some(background) = connection.background.as_mut() else {
+            return Some(message);
+        };
+        let complete_surface = matches!(*message, crate::protocol::ServerMessage::PaneSurface(_));
+        match background.follow(message) {
+            BackgroundDelivery::Kept => {
+                if complete_surface {
+                    connection.surface_resync_requested = false;
+                }
+                None
+            }
+            BackgroundDelivery::Diverged => {
+                self.request_surface_resync(endpoint_id);
+                None
+            }
+            BackgroundDelivery::Other(message) => Some(message),
+        }
     }
 
     pub(crate) fn send(&mut self, message: &ClientMessage) -> EndpointSendOutcome {
@@ -417,6 +474,7 @@ mod tests {
                 crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
                 crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
                 crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY.into(),
+                crate::protocol::endpoint::SURFACE_BACKGROUND_CAPABILITY.into(),
                 crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY.into(),
             ],
         )

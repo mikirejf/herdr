@@ -161,6 +161,10 @@ pub(crate) struct ClientConnection {
     pub(crate) render_pending: bool,
     /// Whether this connection receives pane surfaces and may affect presentation state.
     pub(crate) shell_surface_active: bool,
+    /// Whether this connection keeps receiving pane surfaces, patches and host modes without the
+    /// presentation lease, so its client can show them again without asking. Never set together
+    /// with `shell_surface_active`.
+    pub(crate) shell_surface_background: bool,
     /// Whether this shell wants host mouse capture without pane demand.
     pub(crate) shell_mouse_capture: bool,
     /// Last host mouse capture mode sent to this client.
@@ -239,6 +243,7 @@ impl ClientConnection {
             host_keyboard_report_all_active: None,
             render_pending: false,
             shell_surface_active: true,
+            shell_surface_background: false,
             shell_mouse_capture: false,
             host_mouse_capture_active: None,
             host_sgr_pixels_active: None,
@@ -470,6 +475,11 @@ impl ClientConnection {
 
     pub(crate) fn is_active_shell_client(&self) -> bool {
         self.is_shell_client() && self.shell_surface_active
+    }
+
+    /// Whether this shell receives pane surfaces, with or without the presentation lease.
+    pub(crate) fn streams_shell_surface(&self) -> bool {
+        self.is_shell_client() && (self.shell_surface_active || self.shell_surface_background)
     }
 }
 

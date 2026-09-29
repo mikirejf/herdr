@@ -39,8 +39,10 @@ impl HeadlessServer {
             .iter()
             .filter_map(|(&client_id, client)| match &client.mode {
                 ClientConnectionMode::ClientShell => {
-                    let focused = client
-                        .shell_surface_active
+                    // A background surface gets the modes it would present with, so its client
+                    // can apply them the moment it shows that surface again.
+                    let streams = client.streams_shell_surface();
+                    let focused = streams
                         .then(|| self.shell_focused_runtime(client_id))
                         .flatten();
                     let child_requests_mouse =
@@ -49,9 +51,8 @@ impl HeadlessServer {
                         && focused.is_some_and(|(runtime, _)| runtime.sgr_pixel_mouse_enabled());
                     Some((
                         client_id,
-                        client.shell_surface_active
-                            && (client.shell_mouse_capture || child_requests_mouse),
-                        client.shell_surface_active && sgr_pixels,
+                        streams && (client.shell_mouse_capture || child_requests_mouse),
+                        streams && sgr_pixels,
                     ))
                 }
                 ClientConnectionMode::TerminalAttach { terminal_id } => {
@@ -115,7 +116,7 @@ impl HeadlessServer {
             .iter()
             .filter(|(_, client)| client.is_shell_client())
             .map(|(&client_id, client)| {
-                let report_all = client.shell_surface_active
+                let report_all = client.streams_shell_surface()
                     && self
                         .shell_focused_runtime(client_id)
                         .is_some_and(|(runtime, _)| {
@@ -226,7 +227,7 @@ impl HeadlessServer {
         let mut pane_ids = HashSet::new();
         if has_app_target {
             for (&client_id, client) in &self.clients {
-                if !client.is_active_shell_client() || client.writer.is_none() {
+                if !client.streams_shell_surface() || client.writer.is_none() {
                     continue;
                 }
                 let Some(target) = self.shell_target_for_client(client_id) else {
@@ -281,7 +282,7 @@ impl HeadlessServer {
             .filter(|client| client.writer.is_some())
         {
             match &client.mode {
-                ClientConnectionMode::ClientShell if client.shell_surface_active => {
+                ClientConnectionMode::ClientShell if client.streams_shell_surface() => {
                     has_app_target = true;
                 }
                 ClientConnectionMode::ClientShell => {}
@@ -344,7 +345,7 @@ impl HeadlessServer {
 
     fn any_shell_surface_contains_pane(&self, pane_id: crate::layout::PaneId) -> bool {
         self.clients.iter().any(|(&client_id, client)| {
-            if !client.is_active_shell_client() || client.writer.is_none() {
+            if !client.streams_shell_surface() || client.writer.is_none() {
                 return false;
             }
             if self
@@ -512,7 +513,7 @@ impl HeadlessServer {
                 && self
                     .clients
                     .get(&client_id)
-                    .is_some_and(|client| client.shell_surface_active)
+                    .is_some_and(ClientConnection::streams_shell_surface)
             {
                 let render_started = crate::render_prof::timer();
                 let render_cell_size = if cell_size.is_known() {
@@ -659,7 +660,7 @@ impl HeadlessServer {
                     client.shell_agent_view = agent_view;
                 }
                 shell_projection_revision = client.shell_projection_revision;
-                if !client.shell_surface_active {
+                if !client.streams_shell_surface() {
                     client.clear_deferred_render();
                     continue;
                 }

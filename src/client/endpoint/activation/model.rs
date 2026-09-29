@@ -249,6 +249,8 @@ impl BufferedInput {
 #[derive(Debug)]
 pub(crate) struct PendingEndpointActivation {
     pub(super) source: EndpointLease,
+    /// Seeded while the source still presents; `start` hands it to the registry.
+    pub(super) source_background: Option<super::BackgroundSurface>,
     pub(super) source_available: bool,
     pub(super) target: EndpointLease,
     pub(super) focus: Option<crate::client::shell::ClientEndpointFocusTarget>,

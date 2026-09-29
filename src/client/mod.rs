@@ -1391,6 +1391,11 @@ async fn run_client_loop(
                     }
                     continue;
                 }
+                let Some(message) =
+                    write_stream.follow_background_surface(&endpoint_id, generation, message)
+                else {
+                    continue;
+                };
                 let endpoint_active = write_stream.active_id() == &endpoint_id
                     && write_stream
                         .connection(&endpoint_id)

@@ -259,7 +259,7 @@ impl HeadlessServer {
                 || self
                     .clients
                     .get(client_id)
-                    .is_some_and(|client| client.shell_surface_active)
+                    .is_some_and(ClientConnection::streams_shell_surface)
         });
         if targets.is_empty() {
             success!("no_active_surface");

@@ -276,6 +276,34 @@ impl ClientShellState {
             .map(|snapshot| snapshot.boot_id.as_str())
     }
 
+    /// The endpoint's latest snapshot from `generation`, whether or not it is presented.
+    pub(crate) fn endpoint_snapshot(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+    ) -> Option<&ClientShellSnapshot> {
+        let endpoint = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)?;
+        endpoint
+            .snapshot_generation
+            .is_none_or(|snapshot_generation| snapshot_generation == generation)
+            .then_some(endpoint.snapshot.as_deref())
+            .flatten()
+    }
+
+    /// The newest surface the active endpoint sent, with every patch applied. The endpoint
+    /// streams its next patches against this surface.
+    pub(crate) fn followed_pane_surface(&self) -> Option<&PaneSurfaceFrame> {
+        if self.pane_surface_generation != self.active_snapshot_generation {
+            return None;
+        }
+        self.pending_pane_surface
+            .as_ref()
+            .or(self.pane_surface.as_ref())
+    }
+
     pub(crate) fn endpoint_snapshot_matches(
         &self,
         endpoint_id: &ClientEndpointId,

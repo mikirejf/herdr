@@ -2,8 +2,10 @@ use std::time::{Duration, Instant};
 
 use super::{ClientEndpointId, ClientEndpointStatus, EndpointRegistry, EndpointSendOutcome};
 
+mod background;
 mod model;
 mod protocol;
+pub(crate) use background::{BackgroundDelivery, BackgroundSurface};
 pub(crate) use model::{
     ActivationBeginError, ActivationCompletion, ActivationRollback, CommittedActivation,
     EndpointActivationIntent, PendingEndpointActivation, SurfaceActivationProgress,
@@ -22,6 +24,7 @@ fn release_surface_best_effort(
         return;
     }
     endpoints.set_surface_active(&lease.endpoint_id, false);
+    endpoints.set_background_surface(&lease.endpoint_id, None);
     let _ = endpoints.send_to(
         &lease.endpoint_id,
         &crate::protocol::ClientMessage::ClientShellFocus { focused: false },
@@ -32,6 +35,129 @@ fn release_surface_best_effort(
         }
         Err(error) => tracing::warn!(%error, "could not request abandoned surface cleanup"),
     }
+}
+
+/// Release the presenting source. A remote source keeps streaming its surface in the background,
+/// so switching back to it needs no round trip. Local already answers within a millisecond, so
+/// it stops rendering for this client instead.
+fn release_source(
+    lease: &EndpointLease,
+    background: Option<BackgroundSurface>,
+    endpoints: &mut EndpointRegistry,
+    request_id: String,
+) {
+    let Some(background) = background else {
+        release_surface_best_effort(lease, endpoints, request_id);
+        return;
+    };
+    if !endpoints.accepts(&lease.endpoint_id, lease.generation) {
+        return;
+    }
+    endpoints.set_surface_active(&lease.endpoint_id, false);
+    endpoints.set_background_surface(&lease.endpoint_id, Some(background));
+    let _ = endpoints.send_to(
+        &lease.endpoint_id,
+        &crate::protocol::ClientMessage::ClientShellFocus { focused: false },
+    );
+    let _ = endpoints.send_to(
+        &lease.endpoint_id,
+        &crate::protocol::ClientMessage::EndpointControl {
+            kind: crate::protocol::endpoint::SURFACE_BACKGROUND_KIND.into(),
+            data: String::new(),
+        },
+    );
+}
+
+/// The presenting source's surface, seeded from what the shell shows, when the source should
+/// keep streaming after it is released.
+fn source_background(
+    shell: &crate::client::shell::ClientShellState,
+    source: &EndpointLease,
+    target: &ClientEndpointId,
+    resize: &crate::protocol::ClientMessage,
+) -> Option<BackgroundSurface> {
+    (!source.endpoint_id.is_local()
+        && source.endpoint_id != *target
+        && shell.endpoint_is_active(&source.endpoint_id))
+    .then(|| {
+        BackgroundSurface::new(
+            source.boot_id.clone(),
+            resize.clone(),
+            shell.followed_pane_surface().cloned(),
+        )
+    })
+}
+
+/// Present a background endpoint's kept surface at once, then tell the endpoint it presents
+/// again. Returns `None`, with the presentation unchanged, when the kept surface cannot be proven
+/// current or the endpoint cannot be reached; the caller then runs a full activation, which also
+/// reports a lost connection.
+pub(crate) fn present_background_surface(
+    shell: &mut crate::client::shell::ClientShellState,
+    endpoints: &mut EndpointRegistry,
+    target: &ClientEndpointId,
+    focus: Option<&crate::client::shell::ClientEndpointFocusTarget>,
+    resize: &crate::protocol::ClientMessage,
+    serial: u64,
+) -> Option<CommittedActivation> {
+    let generation = endpoints.connection(target)?.generation;
+    let (surface, effects) = endpoints
+        .background_surface(target)?
+        .presentable(shell, target, generation, resize, focus)?;
+    let (surface, effects) = (surface.clone(), effects.to_vec());
+    let source_id = endpoints.active_id().clone();
+    let source = endpoints
+        .connection(&source_id)
+        .is_some_and(|connection| connection.surface_active)
+        .then(|| endpoint_lease(shell, endpoints, &source_id).ok())
+        .flatten();
+
+    // The foreground control keeps the endpoint's projection epoch, so the stream that follows
+    // continues from the surface presented here. Focus needs the lease, so it comes second.
+    for message in [
+        crate::protocol::ClientMessage::EndpointControl {
+            kind: crate::protocol::endpoint::SURFACE_FOREGROUND_KIND.into(),
+            data: String::new(),
+        },
+        crate::protocol::ClientMessage::ClientShellFocus {
+            focused: shell.host_focus_baseline(),
+        },
+    ] {
+        if endpoints.send_to(target, &message) != EndpointSendOutcome::Sent {
+            return None;
+        }
+    }
+    if let Some(source) = source {
+        let background = source_background(shell, &source, target, resize);
+        release_source(
+            &source,
+            background,
+            endpoints,
+            format!("client-shell-surface:{serial}:off"),
+        );
+    }
+
+    endpoints.set_background_surface(target, None);
+    endpoints.set_surface_active(target, true);
+    shell.set_endpoint_status(target, ClientEndpointStatus::Online);
+    // The kept surface was checked against this connection's snapshot, and the sends above kept
+    // the connection, so both steps hold.
+    assert!(
+        endpoints.set_active(target),
+        "a sent-to endpoint stays connected"
+    );
+    assert!(
+        shell.activate_endpoint_projection(target),
+        "a presentable endpoint has a snapshot"
+    );
+    shell.set_pane_surface(surface);
+    Some(CommittedActivation {
+        completion: ActivationCompletion::Activated,
+        endpoint_id: target.clone(),
+        generation,
+        effects,
+        input: Vec::new(),
+    })
 }
 
 impl PendingEndpointActivation {
@@ -104,7 +230,11 @@ impl PendingEndpointActivation {
         }
 
         let focus_acknowledged = focus.is_none();
+        let source_background = source_available
+            .then(|| source_background(shell, &source, &target_lease.endpoint_id, &resize))
+            .flatten();
         Ok(Self {
+            source_background,
             source,
             source_available,
             target: target_lease,
@@ -137,8 +267,9 @@ impl PendingEndpointActivation {
         // keeps release before any later restore, and the target's activation reply alone
         // decides what is presented next.
         if self.source_available && self.source.endpoint_id != self.target.endpoint_id {
-            release_surface_best_effort(
+            release_source(
                 &self.source,
+                self.source_background.take(),
                 endpoints,
                 format!("client-shell-surface:{}:off", self.epoch),
             );

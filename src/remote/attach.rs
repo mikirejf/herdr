@@ -2167,6 +2167,7 @@ impl RemoteClientStatusJson {
                     crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY,
                     crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY,
                     crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY,
+                    crate::protocol::endpoint::SURFACE_BACKGROUND_CAPABILITY,
                     crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY,
                 ]
                 .iter()
@@ -4125,6 +4126,7 @@ mod tests {
                 crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
                 crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
                 crate::protocol::endpoint::PANE_FOCUS_STYLE_CAPABILITY.into(),
+                crate::protocol::endpoint::SURFACE_BACKGROUND_CAPABILITY.into(),
                 crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY.into(),
             ],
             remote_host_bridge: false,
@@ -5116,7 +5118,7 @@ function Get-Process {
         // Shaped like Rohan's capture: a new binary is installed while the old daemon stays alive.
         // The old daemon has activation effects but no pane focus style.
         let installed = parse_client_status_json(
-            r#"{"version":"0.8.2","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","surface_activation_effects","pane_focus_style","health_check"]}"#,
+            r#"{"version":"0.8.2","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","surface_activation_effects","pane_focus_style","surface_background","health_check"]}"#,
         )
         .unwrap();
         let running_binary = parse_client_status_json(
