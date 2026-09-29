@@ -75,6 +75,9 @@ pub(super) struct ClientState {
     pub(super) presentation_frozen: bool,
     /// Latest explicit Local selection awaiting this client's replacement Local connection.
     pub(super) deferred_local_activation: Option<endpoint::EndpointActivationIntent>,
+    /// Presentation effects a committed handoff held back, handled ahead of any new event so
+    /// they apply right after the frame they describe.
+    pub(super) committed_effects: std::collections::VecDeque<ClientLoopEvent>,
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,
@@ -131,6 +134,7 @@ impl ClientState {
             repaint_pending: false,
             presentation_frozen: false,
             deferred_local_activation: None,
+            committed_effects: Default::default(),
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
             shell: Some(shell::ClientShellState::new(
@@ -175,8 +179,8 @@ impl ClientState {
         self.host_theme_updates.push(update.clone());
     }
 
-    /// Replay the retained physical-host baseline only after an endpoint owns the committed
-    /// presentation. The endpoint transport preserves this order ahead of the resync control.
+    /// Replay the retained physical-host baseline to an endpoint that may have missed updates
+    /// while another endpoint was selected.
     pub(super) fn replay_host_theme(
         &self,
         endpoints: &mut endpoint::EndpointRegistry,

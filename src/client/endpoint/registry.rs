@@ -49,7 +49,7 @@ impl EndpointNegotiation {
     pub(crate) fn supports_surface_interest(&self) -> bool {
         self.supports_capability(crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY)
             && self.supports_capability(
-                crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY,
+                crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY,
             )
             && self.supports_method("client_shell.surface.set")
     }
@@ -414,7 +414,7 @@ mod tests {
             vec!["client_shell.surface.set".into()],
             vec![
                 crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
-                crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
+                crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
                 crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY.into(),
             ],
         )

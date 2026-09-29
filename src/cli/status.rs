@@ -297,7 +297,7 @@ fn client_status_json() -> ClientStatusJson {
         endpoint_protocol_generation: crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
         endpoint_capabilities: vec![
             crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY,
-            crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY,
+            crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY,
             crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY,
         ],
         remote_host_bridge: true,

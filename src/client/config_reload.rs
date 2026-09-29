@@ -77,7 +77,7 @@ pub(super) fn apply_reload(
     if let Some(resize) = resize {
         if let Some(activation) = pending_activation.as_mut() {
             if let Err(error) = activation.update_resize(resize, endpoints) {
-                rollback_endpoint_activation(state, endpoints, pending_activation, error, false);
+                rollback_endpoint_activation(state, endpoints, pending_activation, error);
             }
         } else {
             write_to_server(endpoints, &resize).map_err(ClientError::ConnectionLost)?;

@@ -19,9 +19,39 @@ pub(super) struct ActivationEvidence {
     pub(super) focused_tab_id: Option<String>,
     pub(super) focused_pane_id: Option<String>,
     pub(super) surface: Option<crate::protocol::PaneSurfaceFrame>,
+    /// Presentation effects from the endpoint being activated, in arrival order. They describe
+    /// that endpoint, so they wait for its frame instead of reaching the frozen one.
+    pub(super) effects: Vec<crate::protocol::ServerMessage>,
 }
 
 impl ActivationEvidence {
+    pub(super) fn record_effect(&mut self, effect: crate::protocol::ServerMessage) {
+        use crate::protocol::ServerMessage;
+
+        match (&effect, self.effects.last_mut()) {
+            // Modes and the title are state, so only the latest of each matters.
+            (
+                ServerMessage::MouseCapture { .. }
+                | ServerMessage::ClientShellKeyboardReportAll { .. }
+                | ServerMessage::WindowTitle { .. },
+                _,
+            ) => {
+                let kind = std::mem::discriminant(&effect);
+                self.effects
+                    .retain(|current| std::mem::discriminant(current) != kind);
+            }
+            (
+                ServerMessage::TerminalBell { count },
+                Some(ServerMessage::TerminalBell { count: pending }),
+            ) => {
+                *pending = pending.saturating_add(*count);
+                return;
+            }
+            _ => {}
+        }
+        self.effects.push(effect);
+    }
+
     pub(super) fn record_snapshot(&mut self, snapshot: &crate::protocol::ClientShellSnapshot) {
         if self
             .snapshot_revision
@@ -86,9 +116,6 @@ impl ActivationEvidence {
 
 #[derive(Clone, Debug)]
 pub(super) enum ActivationPhase {
-    ReleasingSource {
-        request_id: String,
-    },
     ActivatingTarget {
         request_id: String,
         acknowledged_revision: Option<u64>,
@@ -107,29 +134,13 @@ pub(super) enum ActivationPhase {
         acknowledged_revision: Option<u64>,
         evidence: ActivationEvidence,
     },
-    SynchronizingPresentation {
-        lease: EndpointLease,
-        request_id: String,
-        acknowledged_revision: Option<u64>,
-        evidence: ActivationEvidence,
-        completion: Box<ActivationCompletion>,
-    },
-    AwaitingPresentationEffects {
-        lease: EndpointLease,
-        token: String,
-        ready: bool,
-        completion: Box<ActivationCompletion>,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SurfaceActivationProgress {
     Pending,
     Ready,
-    Rejected {
-        message: String,
-        source_release_rejected: bool,
-    },
+    Rejected(String),
     Stale,
 }
 
@@ -144,11 +155,6 @@ pub(crate) enum ActivationRollback {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ActivationCompletion {
-    AwaitingPresentationSync {
-        previous: ClientEndpointId,
-        endpoint: ClientEndpointId,
-    },
-    AwaitingPresentationEffects,
     Activated,
     RestoredSource {
         error: String,
@@ -156,6 +162,18 @@ pub(crate) enum ActivationCompletion {
         /// started only after the original source has been coherently restored.
         successor: Option<EndpointActivationIntent>,
     },
+}
+
+/// What the runtime still owes the endpoint whose frame was just committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommittedActivation {
+    pub(crate) completion: ActivationCompletion,
+    pub(crate) endpoint_id: ClientEndpointId,
+    pub(crate) generation: u64,
+    /// Presentation effects the endpoint sent while the frame was frozen, in arrival order.
+    pub(crate) effects: Vec<crate::protocol::ServerMessage>,
+    /// Keyboard input typed during the switch, in order. Empty unless the target committed.
+    pub(crate) input: Vec<crate::protocol::ClientPaneInputEvent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +193,57 @@ pub(crate) enum ActivationBeginError {
     },
 }
 
+const MAX_BUFFERED_INPUT_EVENTS: usize = 1024;
+const MAX_BUFFERED_INPUT_TEXT_BYTES: usize = 1 << 20;
+
+/// Keyboard and paste input typed while the frame is frozen. Mouse events are dropped: their
+/// coordinates point into the frozen frame, not the one that will replace it.
+#[derive(Debug, Default)]
+pub(super) struct BufferedInput {
+    events: Vec<crate::protocol::ClientPaneInputEvent>,
+    text_bytes: usize,
+    overflowed: bool,
+}
+
+impl BufferedInput {
+    pub(super) fn push(&mut self, events: Vec<crate::protocol::ClientPaneInputEvent>) {
+        use crate::protocol::ClientPaneInputEvent;
+
+        for event in events {
+            if self.overflowed {
+                return;
+            }
+            let text_bytes = match &event {
+                ClientPaneInputEvent::Mouse { .. } => continue,
+                ClientPaneInputEvent::Paste(text) | ClientPaneInputEvent::TextCommit(text) => {
+                    text.len()
+                }
+                ClientPaneInputEvent::Key { generated_text, .. } => {
+                    generated_text.as_ref().map_or(0, String::len)
+                }
+            };
+            if self.events.len() == MAX_BUFFERED_INPUT_EVENTS
+                || self.text_bytes + text_bytes > MAX_BUFFERED_INPUT_TEXT_BYTES
+            {
+                // A prefix of a typed command can be a different command, so deliver all of the
+                // switch's input or none of it.
+                *self = Self {
+                    overflowed: true,
+                    ..Self::default()
+                };
+                return;
+            }
+            self.text_bytes += text_bytes;
+            self.events.push(event);
+        }
+    }
+
+    pub(super) fn take(&mut self) -> Vec<crate::protocol::ClientPaneInputEvent> {
+        self.text_bytes = 0;
+        std::mem::take(&mut self.events)
+    }
+}
+
 /// The only owner of an endpoint handoff. The registry's active endpoint remains the committed
 /// endpoint until the target commits, while this object owns the uncommitted lifecycle lane.
 #[derive(Debug)]
@@ -190,7 +259,8 @@ pub(crate) struct PendingEndpointActivation {
     pub(super) epoch: u64,
     pub(super) next_focus_serial: u64,
     pub(super) rollback_error: Option<String>,
-    /// A different endpoint was selected while this source-off-first transaction was in flight.
-    /// Keep only the latest intent until source restoration commits.
+    /// A different endpoint was selected while this transaction was in flight. Keep only the
+    /// latest intent until source restoration commits.
     pub(super) successor: Option<EndpointActivationIntent>,
+    pub(super) input: BufferedInput,
 }

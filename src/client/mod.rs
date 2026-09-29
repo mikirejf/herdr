@@ -466,6 +466,7 @@ async fn run_client_loop(
         repaint_pending: false,
         presentation_frozen: false,
         deferred_local_activation: None,
+        committed_effects: Default::default(),
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
@@ -764,7 +765,11 @@ async fn run_client_loop(
                 shell.timer_delay(std::time::Instant::now())
             });
         let timer_deadline = client_timer.deadline(std::time::Instant::now(), timer_delay);
-        let immediate_event = scheduled_activation.take();
+        // Held effects go first: a successor activation would freeze the frame they belong to.
+        let immediate_event = state
+            .committed_effects
+            .pop_front()
+            .or_else(|| scheduled_activation.take());
         #[cfg(windows)]
         let event = if let Some(event) = immediate_event {
             event
@@ -1241,7 +1246,6 @@ async fn run_client_loop(
                             &mut write_stream,
                             &mut pending_activation,
                             error,
-                            false,
                         );
                     }
                 } else if let Err(e) = write_to_server(&mut write_stream, &msg) {
@@ -1415,13 +1419,10 @@ async fn run_client_loop(
                 ) {
                     continue;
                 }
-                // Target presentation effects may arrive as soon as surface.set(true) is
-                // acknowledged. They cannot be applied while the source frame is frozen; the
-                // target receives one explicit replay after the coherent commit instead.
-                if state.presentation_frozen
-                    && activation_message
-                    && endpoint::is_presentation_effect(message.as_ref())
-                {
+                if activation_message && endpoint::is_presentation_effect(message.as_ref()) {
+                    if let Some(pending) = pending_activation.as_mut() {
+                        pending.receive_presentation_effect(&endpoint_id, generation, *message);
+                    }
                     continue;
                 }
                 match *message {
@@ -1801,7 +1802,6 @@ async fn run_client_loop(
                                     &mut write_stream,
                                     &mut pending_activation,
                                     "endpoint returned a chunked activation acknowledgement".into(),
-                                    false,
                                 );
                                 continue;
                             }
@@ -1826,16 +1826,12 @@ async fn run_client_loop(
                                         scheduled_activation = Some(event);
                                     }
                                 }
-                                Some(endpoint::SurfaceActivationProgress::Rejected {
-                                    message,
-                                    source_release_rejected,
-                                }) => {
+                                Some(endpoint::SurfaceActivationProgress::Rejected(message)) => {
                                     rollback_endpoint_activation(
                                         &mut state,
                                         &mut write_stream,
                                         &mut pending_activation,
                                         message,
-                                        source_release_rejected,
                                     );
                                 }
                                 _ => {}
@@ -2013,27 +2009,6 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
-                        if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
-                            let progress = pending_activation.as_mut().map(|activation| {
-                                activation.receive_presentation_effects_ready(
-                                    &endpoint_id,
-                                    generation,
-                                    &data,
-                                )
-                            });
-                            if matches!(progress, Some(endpoint::SurfaceActivationProgress::Ready))
-                            {
-                                if let Some(event) = complete_endpoint_activation(
-                                    &mut state,
-                                    &mut write_stream,
-                                    &mut pending_activation,
-                                    &mut endpoint_commands,
-                                )? {
-                                    scheduled_activation = Some(event);
-                                }
-                            }
-                            continue;
-                        }
                         let snapshot = match endpoint::decode_endpoint_control(&kind, &data) {
                             Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
                             Ok(endpoint::EndpointControlMessage::AgentViewProjection(
@@ -2240,7 +2215,6 @@ async fn run_client_loop(
                         &mut write_stream,
                         &mut pending_activation,
                         format!("{label} did not produce a coherent surface in time"),
-                        false,
                     );
                 }
                 if state.shell.is_some() {

@@ -2287,28 +2287,6 @@ impl HeadlessServer {
                 client.host_mouse_capture_active = None;
                 true
             }
-            ServerEvent::ClientShellPresentationSync { client_id, token } => {
-                let Some(client) = self.clients.get_mut(&client_id) else {
-                    return false;
-                };
-                if !client.is_active_shell_client() {
-                    return false;
-                }
-                client.host_mouse_capture_active = None;
-                client.host_sgr_pixels_active = None;
-                client.host_keyboard_report_all_active = None;
-                self.sent_window_title = None;
-                self.stream_host_mouse_capture_mode();
-                self.stream_direct_terminal_keyboard_mode();
-                self.sync_window_title();
-                self.send_to_client(
-                    client_id,
-                    ServerMessage::EndpointControl {
-                        kind: crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND.into(),
-                        data: token,
-                    },
-                )
-            }
             ServerEvent::ClientShellSurfaceResync { client_id } => {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     return false;

@@ -238,7 +238,7 @@ pub(super) fn begin_endpoint_activation(
             if activation.can_retarget(&endpoint_id) {
                 let retarget_error = activation.retarget(target, endpoints).err();
                 if let Some(error) = retarget_error {
-                    rollback_endpoint_activation(state, endpoints, pending, error, false);
+                    rollback_endpoint_activation(state, endpoints, pending, error);
                 }
             } else {
                 // Once rollback starts, even a request for the original target is a new intent.
@@ -305,6 +305,9 @@ pub(super) fn begin_endpoint_activation(
                 previous.abandon(endpoints);
             }
         }
+        // Ahead of surface.set(true) on the same ordered connection, so the target's first
+        // frame already uses the host colors.
+        state.replay_host_theme(endpoints, &endpoint_id);
         activation.start(endpoints)
     }) {
         Ok(activation) => install_pending_activation(
@@ -345,7 +348,6 @@ pub(super) fn begin_endpoint_activation(
                         .map(|shell| shell.endpoint_label(&endpoint_id).to_owned())
                         .unwrap_or_else(|| format!("{endpoint_id:?}"))
                 ),
-                false,
             );
         }
     }
@@ -358,14 +360,7 @@ pub(super) fn complete_endpoint_activation(
     pending: &mut Option<endpoint::PendingEndpointActivation>,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
 ) -> Result<Option<ClientLoopEvent>, ClientError> {
-    let sync_endpoint = pending
-        .as_ref()
-        .and_then(endpoint::PendingEndpointActivation::presentation_sync_endpoint)
-        .cloned();
-    if let Some(endpoint_id) = sync_endpoint.as_ref() {
-        state.replay_host_theme(endpoints, endpoint_id);
-    }
-    let completion = {
+    let committed = {
         let Some(activation) = pending.as_mut() else {
             return Ok(None);
         };
@@ -373,7 +368,7 @@ pub(super) fn complete_endpoint_activation(
             return Ok(None);
         };
         match activation.complete(shell, endpoints) {
-            Ok(completion) => completion,
+            Ok(committed) => committed,
             Err(error) => {
                 shell.receive_endpoint_unavailable(error);
                 return Ok(None);
@@ -381,37 +376,19 @@ pub(super) fn complete_endpoint_activation(
         }
     };
 
-    if matches!(
-        completion,
-        endpoint::ActivationCompletion::AwaitingPresentationSync { .. }
-    ) {
-        // The coherent target frame can replace the frozen source now, but the registry keeps
-        // pane input disabled until a second projection epoch has replayed host modes/effects.
-        state.unfreeze_presentation();
-        let (cleanup, frame) = {
-            let shell = state.shell.as_mut().expect("checked client shell");
-            (
-                shell.take_pending_graphics_cleanup(),
-                shell.compose(state.reported_size.0, state.reported_size.1),
-            )
-        };
-        state.present_graphics(&cleanup);
-        if let Some(frame) = frame {
-            state.present_frame(frame);
-        }
-        return Ok(None);
-    }
-    if completion == endpoint::ActivationCompletion::AwaitingPresentationEffects {
-        return Ok(None);
-    }
-
     let _ = pending.take();
     endpoints.unfreeze_input();
+    let endpoint::CommittedActivation {
+        completion,
+        endpoint_id,
+        generation,
+        effects,
+        input,
+    } = committed;
     let successor = match completion {
         endpoint::ActivationCompletion::RestoredSource {
             error,
             successor: next,
-            ..
         } => {
             if next.is_none() {
                 if let Some(shell) = state.shell.as_mut() {
@@ -421,10 +398,19 @@ pub(super) fn complete_endpoint_activation(
             next
         }
         endpoint::ActivationCompletion::Activated => None,
-        endpoint::ActivationCompletion::AwaitingPresentationSync { .. }
-        | endpoint::ActivationCompletion::AwaitingPresentationEffects => unreachable!(),
     };
     state.unfreeze_presentation();
+    let input = (!input.is_empty())
+        .then(|| {
+            state
+                .shell
+                .as_ref()
+                .and_then(|shell| shell.keyboard_input_message(input))
+        })
+        .flatten();
+    if let Some(input) = input {
+        write_to_server(endpoints, &input).map_err(ClientError::ConnectionLost)?;
+    }
     if successor.is_none() {
         let active_endpoint = endpoints.active_id().clone();
         let cancelled = endpoint_commands.send_next(&active_endpoint, endpoints);
@@ -445,6 +431,17 @@ pub(super) fn complete_endpoint_activation(
     if let Some(frame) = frame {
         state.present_frame(frame);
     }
+    state
+        .committed_effects
+        .extend(
+            effects
+                .into_iter()
+                .map(|message| ClientLoopEvent::ServerMessage {
+                    endpoint_id: endpoint_id.clone(),
+                    generation,
+                    message: Box::new(message),
+                }),
+        );
     // A Local selection made while reconnecting is newer than this transaction's successor.
     if let Some(intent) = successor.filter(|_| state.deferred_local_activation.is_none()) {
         return Ok(Some(ClientLoopEvent::ActivateEndpoint {
@@ -474,12 +471,11 @@ pub(super) fn rollback_endpoint_activation(
     endpoints: &mut endpoint::EndpointRegistry,
     pending: &mut Option<endpoint::PendingEndpointActivation>,
     error: String,
-    source_release_rejected: bool,
 ) {
     let Some(activation) = pending.as_mut() else {
         return;
     };
-    match activation.rollback(endpoints, error.clone(), source_release_rejected) {
+    match activation.rollback(endpoints, error) {
         endpoint::ActivationRollback::Pending => state.freeze_presentation(),
         endpoint::ActivationRollback::Unavailable(message) => {
             *pending = None;
@@ -697,7 +693,7 @@ pub(super) fn finish_client_shell_input(
         );
         if let Some(activation) = pending_activation.as_mut() {
             if let Err(error) = activation.update_resize(resize, endpoints) {
-                rollback_endpoint_activation(state, endpoints, pending_activation, error, false);
+                rollback_endpoint_activation(state, endpoints, pending_activation, error);
             }
         } else {
             let _ = write_to_server(endpoints, &resize);
@@ -740,15 +736,7 @@ pub(super) fn finish_client_shell_input(
         if let ClientMessage::ClientShellHostTheme { update } = &request {
             state.record_host_theme_update(update);
             if let Some(activation) = pending_activation.as_mut() {
-                if let Err(error) = activation.update_host_theme(update.clone(), endpoints) {
-                    rollback_endpoint_activation(
-                        state,
-                        endpoints,
-                        pending_activation,
-                        error,
-                        false,
-                    );
-                }
+                activation.update_host_theme(update.clone(), endpoints);
                 continue;
             }
             if endpoints.active_surface_available() {
@@ -761,13 +749,7 @@ pub(super) fn finish_client_shell_input(
         if let ClientMessage::ClientShellFocus { focused } = request {
             if let Some(activation) = pending_activation.as_mut() {
                 if let Err(error) = activation.update_host_focus(focused, endpoints) {
-                    rollback_endpoint_activation(
-                        state,
-                        endpoints,
-                        pending_activation,
-                        error,
-                        false,
-                    );
+                    rollback_endpoint_activation(state, endpoints, pending_activation, error);
                 }
                 continue;
             }
@@ -777,11 +759,17 @@ pub(super) fn finish_client_shell_input(
             }
             continue;
         }
-        if !active_endpoint_online {
+        if let Some(activation) = pending_activation.as_mut() {
+            // The frozen frame is not the one this input is for, so hold it for the commit.
+            // Its pane ids come from the frozen frame; the commit retargets it.
+            if let ClientMessage::ClientShellPaneInput { events, .. }
+            | ClientMessage::ClientShellPopupInput { events, .. } = request
+            {
+                activation.buffer_input(events);
+            }
             continue;
         }
-        if pending_activation.is_some() {
-            // Pane input and non-focus host effects do not cross the frozen handoff boundary.
+        if !active_endpoint_online {
             continue;
         }
         write_to_server(endpoints, &request).map_err(ClientError::ConnectionLost)?;

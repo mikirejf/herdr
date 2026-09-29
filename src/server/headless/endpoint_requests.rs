@@ -53,6 +53,13 @@ impl HeadlessServer {
                     },
                 ),
             );
+            if params.active {
+                // Send the modes and title ahead of the frame, so the client holds them when it
+                // commits that frame instead of applying them a moment later.
+                self.stream_host_mouse_capture_mode();
+                self.stream_direct_terminal_keyboard_mode();
+                self.sync_window_title();
+            }
             return changed;
         }
         if client.shell_endpoint_command_in_flight {

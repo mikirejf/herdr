@@ -1010,6 +1010,27 @@ impl ClientShellState {
             .map(|terminal_id| ClientInputTarget::Popup(terminal_id.clone()))
     }
 
+    /// Address already-classified keyboard input to the pane or popup that now has focus.
+    pub(crate) fn keyboard_input_message(
+        &self,
+        events: Vec<ClientPaneInputEvent>,
+    ) -> Option<crate::protocol::ClientMessage> {
+        let target = self
+            .popup_input_target()
+            .or_else(|| self.focused_pane_id().map(ClientInputTarget::Pane))?;
+        Some(match target {
+            ClientInputTarget::Pane(pane_id) => {
+                crate::protocol::ClientMessage::ClientShellPaneInput { pane_id, events }
+            }
+            ClientInputTarget::Popup(terminal_id) => {
+                crate::protocol::ClientMessage::ClientShellPopupInput {
+                    terminal_id,
+                    events,
+                }
+            }
+        })
+    }
+
     fn push_pane_key(
         &self,
         target: ClientInputTarget,

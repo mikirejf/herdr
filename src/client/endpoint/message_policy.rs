@@ -1,8 +1,8 @@
 use crate::protocol::ServerMessage;
 
 /// Effects that are meaningful only for the endpoint currently holding the host presentation
-/// lease. During a frozen handoff they are intentionally dropped and the committed target asks
-/// for one bounded replay, rather than allowing target graphics or modes onto the source frame.
+/// lease. During a handoff the activation holds them until the frame they describe is committed,
+/// so target graphics or modes never reach the frozen source frame.
 pub(crate) fn is_presentation_effect(message: &ServerMessage) -> bool {
     matches!(
         message,
@@ -32,12 +32,13 @@ pub(crate) fn accepts_endpoint_message(
                 | ServerMessage::Welcome { .. }
         )
         || (activation_message
-            && matches!(
-                message,
-                ServerMessage::PaneSurface(_)
-                    | ServerMessage::PaneSurfacePatch(_)
-                    | ServerMessage::ClientShellEndpointResponseChunk { .. }
-            ))
+            && (is_presentation_effect(message)
+                || matches!(
+                    message,
+                    ServerMessage::PaneSurface(_)
+                        | ServerMessage::PaneSurfacePatch(_)
+                        | ServerMessage::ClientShellEndpointResponseChunk { .. }
+                )))
         || (command_response
             && matches!(
                 message,
@@ -79,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_handoffs_drop_target_effects_until_the_post_commit_resync() {
+    fn presentation_effects_are_classified_apart_from_metadata() {
         assert!(is_presentation_effect(&ServerMessage::MouseCapture {
             enabled: true,
             sgr_pixels: false,
@@ -100,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_activation_accepts_only_its_surface_lane() {
+    fn pending_activation_accepts_its_surface_lane_and_effects() {
         assert!(accepts_endpoint_message(
             false,
             true,
@@ -129,13 +130,24 @@ mod tests {
             ),
             "patches advance the surface the activation will commit"
         );
+        assert!(
+            accepts_endpoint_message(
+                false,
+                true,
+                false,
+                &ServerMessage::MouseCapture {
+                    enabled: true,
+                    sgr_pixels: false,
+                }
+            ),
+            "the activation holds effects for its commit"
+        );
         assert!(!accepts_endpoint_message(
             false,
             true,
             false,
-            &ServerMessage::MouseCapture {
-                enabled: true,
-                sgr_pixels: false,
+            &ServerMessage::Clipboard {
+                data: "text".into()
             }
         ));
     }

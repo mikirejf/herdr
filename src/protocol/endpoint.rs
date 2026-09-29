@@ -21,9 +21,9 @@ pub const SURFACE_CODEC_V1: &str = "shell.surface.v1";
 pub const INPUT_CODEC_V1: &str = "shell.input.semantic.v1";
 pub const BLOB_CODEC_V1: &str = "shell.blob.v1";
 pub const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
-pub const PRESENTATION_EFFECTS_FENCE_CAPABILITY: &str = "presentation_effects_fence";
-pub const PRESENTATION_EFFECTS_SYNC_KIND: &str = "endpoint.presentation.sync.v1";
-pub const PRESENTATION_EFFECTS_READY_KIND: &str = "endpoint.presentation.ready.v1";
+/// The server answers `client_shell.surface.set(true)` with its mouse mode, keyboard mode and
+/// window title ahead of the frame, so a switch commits in one round trip.
+pub const SURFACE_ACTIVATION_EFFECTS_CAPABILITY: &str = "surface_activation_effects";
 /// Client-to-server request for a complete pane surface after the client could not apply a
 /// patch. Servers without it ignore the unknown control; the client then waits for the next
 /// complete surface as before.
@@ -174,7 +174,7 @@ impl EndpointServerWelcome {
                 super::surface_delta::CAPABILITY.into(),
                 super::surface_scroll::CAPABILITY.into(),
                 SURFACE_INTEREST_CAPABILITY.into(),
-                PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
+                SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
@@ -385,7 +385,7 @@ mod tests {
                 super::super::surface_delta::CAPABILITY.to_string(),
                 super::super::surface_scroll::CAPABILITY.to_string(),
                 SURFACE_INTEREST_CAPABILITY.to_string(),
-                PRESENTATION_EFFECTS_FENCE_CAPABILITY.to_string(),
+                SURFACE_ACTIVATION_EFFECTS_CAPABILITY.to_string(),
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),

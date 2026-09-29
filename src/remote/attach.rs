@@ -2165,7 +2165,7 @@ impl RemoteClientStatusJson {
             && (!require_surface_interest
                 || [
                     crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY,
-                    crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY,
+                    crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY,
                     crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY,
                 ]
                 .iter()
@@ -4122,7 +4122,7 @@ mod tests {
             ),
             endpoint_capabilities: vec![
                 crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
-                crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
+                crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
                 crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY.into(),
             ],
             remote_host_bridge: false,
@@ -5106,18 +5106,19 @@ function Get-Process {
     }
 
     #[test]
-    fn saved_machine_setup_handoffs_old_server_missing_presentation_fence() {
+    fn saved_machine_setup_handoffs_old_server_missing_surface_activation_effects() {
         let linux = RemotePlatform {
             os: "linux",
             arch: "x86_64",
         };
-        // Captured from Rohan after installing a new binary while the old daemon stayed alive.
+        // Shaped like Rohan's capture: a new binary is installed while the old daemon stays alive.
+        // The old daemon advertises the removed effects fence, not activation effects.
         let installed = parse_client_status_json(
-            r#"{"version":"0.8.2","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"]}"#,
+            r#"{"version":"0.8.2","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","surface_activation_effects","health_check"]}"#,
         )
         .unwrap();
         let running_binary = parse_client_status_json(
-            r#"{"version":"0.8.2","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","health_check"]}"#,
+            r#"{"version":"0.8.2","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"]}"#,
         )
         .unwrap();
         assert!(installed.supports_endpoint_requirement(&linux, true));

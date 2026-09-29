@@ -22,7 +22,7 @@ fn lifecycle_negotiation() -> EndpointNegotiation {
         vec!["client_shell.surface.set".into()],
         vec![
             crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
-            crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
+            crate::protocol::endpoint::SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
         ],
     )
 }
@@ -234,6 +234,9 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
                 request_id, data, ..
             } if request_id == "reactivate-surface" => break data,
             ServerMessage::EndpointControl { .. }
+            | ServerMessage::MouseCapture { .. }
+            | ServerMessage::ClientShellKeyboardReportAll { .. }
+            | ServerMessage::WindowTitle { .. }
             | ServerMessage::ClientShellEndpointResponseChunk { .. } => continue,
             other => panic!("unexpected surface reactivation message: {other:?}"),
         }
@@ -335,10 +338,10 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
         Some(&7)
     );
 
-    request_active_surface(&mut server, 8, "synchronize-background-surface");
+    request_active_surface(&mut server, 8, "reassert-background-surface");
     let _ = background_control
         .recv()
-        .expect("background presentation synchronization response");
+        .expect("background surface reassertion response");
     assert_eq!(
         server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
         focused_size
@@ -388,7 +391,7 @@ async fn focused_surface_reassertion_reclaims_tab_geometry() {
 }
 
 #[tokio::test]
-async fn presentation_sync_epoch_replays_modes_and_title() {
+async fn surface_activation_reply_carries_modes_and_title() {
     let mut server = test_headless_server();
     let (writer, control_rx, _render_rx) = test_client_writer();
     let client_id = 63;
@@ -406,50 +409,30 @@ async fn presentation_sync_epoch_replays_modes_and_title() {
             direct_graphics: false,
             endpoint_keybindings: true,
             mouse_capture: true,
-            surface_active: true,
+            surface_active: false,
             writer,
         })
     );
     let _ = client_shell_snapshot(&control_rx);
     server.api_window_title = Some("target title".into());
     {
+        // The modes a previous surface epoch already sent must not be deduplicated away.
         let client = server.clients.get_mut(&client_id).unwrap();
-        client.host_mouse_capture_active = Some(false);
+        client.host_mouse_capture_active = Some(true);
         client.host_sgr_pixels_active = Some(false);
         client.host_keyboard_report_all_active = Some(false);
     }
 
-    let boot_id = server.client_shell_boot_id.clone();
-    assert!(
-        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
-            client_id,
-            boot_id,
-            request: Box::new(api::schema::Request {
-                id: "post-commit-reassert".into(),
-                method: api::schema::Method::ClientShellSurfaceSet(
-                    api::schema::ClientShellSurfaceSetParams { active: true },
-                ),
-            }),
-        })
-    );
-    let _ = control_rx
-        .recv()
-        .expect("typed surface reassertion acknowledgement");
-    server.stream_host_mouse_capture_mode();
-    server.stream_direct_terminal_keyboard_mode();
-    server.sync_window_title();
-    assert_eq!(
-        server.clients[&client_id].host_mouse_capture_active,
-        Some(true),
-        "the target mode is sent after, not during, the frozen handoff"
-    );
-    assert_eq!(
-        server.clients[&client_id].host_keyboard_report_all_active,
-        Some(false)
-    );
-    let messages = (0..3)
-        .map(|_| read_server_message(control_rx.recv().expect("reassertion effect")))
+    request_active_surface(&mut server, client_id, "activate");
+
+    let messages = std::iter::from_fn(|| control_rx.recv_timeout(Duration::from_millis(200)).ok())
+        .map(read_server_message)
         .collect::<Vec<_>>();
+    assert!(matches!(
+        messages.first(),
+        Some(ServerMessage::ClientShellEndpointResponseChunk { request_id, .. })
+            if request_id == "activate"
+    ));
     assert!(messages
         .iter()
         .any(|message| matches!(message, ServerMessage::MouseCapture { enabled: true, .. })));
@@ -594,8 +577,8 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
     )
     .unwrap();
 
-    // Route the source-off-first client messages through a second real HeadlessServer. Its
-    // typed response is the only source acknowledgement supplied to the activation state.
+    // Route the source release through a second real HeadlessServer. The activation never
+    // waits for its reply.
     let mut source_release_request_id = None;
     for message in std::mem::take(&mut *source_sent.lock().unwrap()) {
         match message {
@@ -651,7 +634,7 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             &source_release_data,
             &mut endpoints,
         ),
-        crate::client::endpoint::SurfaceActivationProgress::Pending
+        crate::client::endpoint::SurfaceActivationProgress::Stale
     );
 
     dispatch_lifecycle_messages(
@@ -678,6 +661,24 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
         crate::client::endpoint::SurfaceActivationProgress::Pending
     );
 
+    // The modes and title ride on the activation reply. The client holds them for the commit.
+    let mut held_effects = Vec::new();
+    while let Ok(framed) = target_control.recv_timeout(Duration::from_millis(200)) {
+        let message = read_server_message(framed);
+        assert!(
+            crate::client::endpoint::is_presentation_effect(&message),
+            "unexpected activation reply message: {message:?}"
+        );
+        held_effects.push(message.clone());
+        activation.receive_presentation_effect(&target_id, 7, message);
+    }
+    assert!(held_effects
+        .iter()
+        .any(|message| matches!(message, ServerMessage::MouseCapture { .. })));
+    assert!(held_effects
+        .iter()
+        .any(|message| matches!(message, ServerMessage::ClientShellKeyboardReportAll { .. })));
+
     target_server.render_and_stream();
     let coherent_snapshot = client_shell_snapshot(&target_control);
     let snapshot_progress = activation.receive_snapshot(&target_id, 7, &coherent_snapshot);
@@ -696,129 +697,19 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
         crate::client::endpoint::SurfaceActivationProgress::Ready
     );
 
-    assert!(matches!(
-        activation.complete(&mut shell, &mut endpoints),
-        Ok(crate::client::endpoint::ActivationCompletion::AwaitingPresentationSync {
-            endpoint,
-            ..
-        }) if endpoint == target_id
-    ));
+    let committed = activation.complete(&mut shell, &mut endpoints).unwrap();
+    assert_eq!(
+        committed.completion,
+        crate::client::endpoint::ActivationCompletion::Activated
+    );
+    assert_eq!(committed.endpoint_id, target_id);
+    assert_eq!(committed.effects, held_effects);
     assert!(
-        !endpoints.active_surface_available(),
-        "target input remains fenced while presentation effects resynchronize"
+        target_sent.lock().unwrap().is_empty(),
+        "the commit needs nothing more from the target"
     );
-
-    let sync_request = target_sent
-        .lock()
-        .unwrap()
-        .iter()
-        .find_map(|message| match message {
-            crate::protocol::ClientMessage::ClientShellEndpointRequest { boot_id, request } => {
-                let request = serde_json::from_str::<api::schema::Request>(request).ok()?;
-                request
-                    .id
-                    .ends_with(":presentation-sync")
-                    .then(|| (boot_id.clone(), Box::new(request)))
-            }
-            _ => None,
-        })
-        .expect("client presentation synchronization request");
-    assert!(
-        target_server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
-            client_id: target_client_id,
-            boot_id: sync_request.0,
-            request: sync_request.1,
-        })
-    );
-    let (sync_request_id, sync_data) = loop {
-        let message = read_server_message(target_control.recv().expect("presentation sync ack"));
-        if let ServerMessage::ClientShellEndpointResponseChunk {
-            request_id, data, ..
-        } = message
-        {
-            if request_id.ends_with(":presentation-sync") {
-                break (request_id, data);
-            }
-        }
-    };
-    assert_eq!(
-        activation.receive_response(&target_id, 7, &sync_request_id, &sync_data, &mut endpoints,),
-        crate::client::endpoint::SurfaceActivationProgress::Pending
-    );
-    target_server.render_and_stream();
-    let sync_snapshot = loop {
-        let message =
-            read_server_message(target_control.recv().expect("presentation sync snapshot"));
-        if let ServerMessage::EndpointControl { kind, data } = message {
-            if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
-                break serde_json::from_str::<crate::protocol::ClientShellSnapshot>(&data).unwrap();
-            }
-        }
-    };
-    let sync_progress = activation.receive_snapshot(&target_id, 7, &sync_snapshot);
-    shell.set_endpoint_snapshot_for_generation(&target_id, 7, Box::new(sync_snapshot));
-    assert_eq!(
-        sync_progress,
-        crate::client::endpoint::SurfaceActivationProgress::Pending
-    );
-    let ServerMessage::PaneSurface(sync_surface) =
-        read_server_message(target_render.recv().expect("presentation sync surface"))
-    else {
-        panic!("expected synchronized target surface");
-    };
-    assert_eq!(
-        activation.receive_surface(&target_id, 7, sync_surface),
-        crate::client::endpoint::SurfaceActivationProgress::Ready
-    );
-    assert_eq!(
-        activation.complete(&mut shell, &mut endpoints),
-        Ok(crate::client::endpoint::ActivationCompletion::AwaitingPresentationEffects)
-    );
-    let effects_token = target_sent
-        .lock()
-        .unwrap()
-        .iter()
-        .find_map(|message| match message {
-            crate::protocol::ClientMessage::EndpointControl { kind, data }
-                if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_SYNC_KIND =>
-            {
-                Some(data.clone())
-            }
-            _ => None,
-        })
-        .expect("client presentation effects fence");
-    assert!(
-        target_server.handle_server_event(ServerEvent::ClientShellPresentationSync {
-            client_id: target_client_id,
-            token: effects_token.clone(),
-        })
-    );
-    let mut replayed_mouse = false;
-    let mut replayed_keyboard = false;
-    loop {
-        match read_server_message(target_control.recv().expect("presentation effect or fence")) {
-            ServerMessage::MouseCapture { .. } => replayed_mouse = true,
-            ServerMessage::ClientShellKeyboardReportAll { .. } => replayed_keyboard = true,
-            ServerMessage::EndpointControl { kind, data }
-                if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND =>
-            {
-                assert_eq!(data, effects_token);
-                assert_eq!(
-                    activation.receive_presentation_effects_ready(&target_id, 7, &data),
-                    crate::client::endpoint::SurfaceActivationProgress::Ready
-                );
-                break;
-            }
-            ServerMessage::WindowTitle { .. } => {}
-            other => panic!("unexpected presentation fence message: {other:?}"),
-        }
-    }
-    assert!(replayed_mouse);
-    assert!(replayed_keyboard);
-    assert_eq!(
-        activation.complete(&mut shell, &mut endpoints),
-        Ok(crate::client::endpoint::ActivationCompletion::Activated)
-    );
+    endpoints.unfreeze_input();
+    assert_eq!(endpoints.active_id(), &target_id);
     endpoints.unfreeze_input();
     assert_eq!(endpoints.active_id(), &target_id);
     assert!(endpoints.active_surface_available());
