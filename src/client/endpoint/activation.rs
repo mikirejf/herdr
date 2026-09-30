@@ -378,10 +378,15 @@ impl PendingEndpointActivation {
             endpoint_id,
             target,
         });
-        // Source-on is already ordered and must finish before any replacement is allowed to
-        // begin. Later rapid selections only replace the retained intent; they never turn a
-        // safe restoration into an unavailable state.
-        if matches!(self.phase, ActivationPhase::RestoringSource { .. }) {
+        // Source-on and target-off are already ordered and must finish before any replacement is
+        // allowed to begin. Later rapid selections only replace the retained intent; they never
+        // turn a safe restoration into an unavailable state or close a target before its
+        // revocation deadline.
+        if matches!(
+            self.phase,
+            ActivationPhase::RestoringSource { .. }
+                | ActivationPhase::ReleasingTargetForRollback { .. }
+        ) {
             return ActivationRollback::Pending;
         }
         self.rollback(
@@ -709,7 +714,7 @@ impl PendingEndpointActivation {
         let rollback = self.lose_endpoint(endpoints, endpoint_id, error);
         report.warn(
             "endpoint activation lost an endpoint",
-            self.rollback_error.as_deref(),
+            self.logged_error(&rollback),
             self.rollback_outcome(&rollback),
         );
         rollback
@@ -765,7 +770,7 @@ impl PendingEndpointActivation {
         let rollback = self.start_rollback(endpoints, error);
         report.warn(
             "endpoint activation rolled back",
-            self.rollback_error.as_deref(),
+            self.logged_error(&rollback),
             self.rollback_outcome(&rollback),
         );
         rollback
@@ -909,6 +914,14 @@ impl PendingEndpointActivation {
             effects,
             input,
         })
+    }
+
+    /// An unavailable outcome carries why the rollback itself failed, on top of the original error.
+    fn logged_error<'a>(&'a self, rollback: &'a ActivationRollback) -> Option<&'a str> {
+        match rollback {
+            ActivationRollback::Unavailable(message) => Some(message),
+            ActivationRollback::Pending => self.rollback_error.as_deref(),
+        }
     }
 
     fn rollback_outcome(&self, rollback: &ActivationRollback) -> &'static str {

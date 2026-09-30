@@ -1391,6 +1391,51 @@ fn rollback_keeps_the_latest_intent_even_when_it_returns_to_the_target() {
 }
 
 #[test]
+fn a_newer_intent_does_not_close_an_unexpired_target_revocation() {
+    let (shell, mut endpoints, _local_sent, _remote_sent) = shell_and_registry();
+    let target = endpoint();
+    let other = ClientEndpointId::Ssh(
+        super::super::ProfileId::parse("fedcba9876543210fedcba9876543210").unwrap(),
+    );
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        target.clone(),
+        None,
+        resize(),
+        90,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        activation.supersede(other.clone(), None, &mut endpoints),
+        ActivationRollback::Pending
+    );
+    assert!(matches!(
+        activation.phase,
+        ActivationPhase::ReleasingTargetForRollback { .. }
+    ));
+    assert!(!activation.expired(Instant::now()));
+
+    assert_eq!(
+        activation.supersede(target.clone(), None, &mut endpoints),
+        ActivationRollback::Pending
+    );
+    assert!(
+        endpoints.connection(&target).is_some(),
+        "a newer intent must not close an unexpired revocation"
+    );
+    assert!(endpoints.take_failures().is_empty());
+    assert_eq!(
+        activation.successor,
+        Some(EndpointActivationIntent {
+            endpoint_id: target,
+            target: None,
+        })
+    );
+}
+
+#[test]
 fn unacknowledged_target_release_closes_target_before_restoring_source() {
     let (shell, mut endpoints, local_sent, _remote_sent) = shell_and_registry();
     let target = endpoint();
