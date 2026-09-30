@@ -18,14 +18,7 @@ pub(crate) fn restyle_pane_surface_focus(
     let accent = crate::protocol::color_to_u32(colors.accent);
     let overlay0 = crate::protocol::color_to_u32(colors.overlay0);
     let focused_rect = rect(panes[focused].rect);
-    let is_chrome = |x: u16, y: u16| {
-        panes.iter().all(|pane| {
-            !contains(pane.inner_rect, x, y)
-                && pane
-                    .scrollbar_rect
-                    .is_none_or(|scrollbar| !contains(scrollbar, x, y))
-        })
-    };
+    let is_chrome = |x: u16, y: u16| is_chrome(panes, x, y);
     let is_border_color = |cell: &CellData| cell.fg == accent || cell.fg == overlay0;
 
     // Pane rects do not overlap and every border cell lies on some pane's perimeter.
@@ -58,6 +51,42 @@ pub(crate) fn restyle_pane_surface_focus(
         }
         restyle_scrollbar(frame, pane, colors, pane_focused);
     }
+}
+
+/// Presents the pane chrome drawn in the focus `accent` (the focused border lines and title) in
+/// `color` instead. `area` is the part of `frame` the pane surface was copied into.
+pub(crate) fn recolor_focus_chrome(
+    frame: &mut FrameData,
+    area: Rect,
+    panes: &[PaneSurfacePane],
+    accent: u32,
+    color: u32,
+) {
+    let width = usize::from(frame.width);
+    for pane in panes {
+        for (x, y) in perimeter(rect(pane.rect)) {
+            if x >= area.width || y >= area.height {
+                continue;
+            }
+            let index = usize::from(area.y + y) * width + usize::from(area.x + x);
+            let Some(cell) = frame.cells.get_mut(index) else {
+                continue;
+            };
+            if cell.fg == accent && is_chrome(panes, x, y) {
+                cell.fg = color;
+            }
+        }
+    }
+}
+
+/// Whether surface cell (`x`, `y`) is outside every pane's terminal and scrollbar.
+fn is_chrome(panes: &[PaneSurfacePane], x: u16, y: u16) -> bool {
+    panes.iter().all(|pane| {
+        !contains(pane.inner_rect, x, y)
+            && pane
+                .scrollbar_rect
+                .is_none_or(|scrollbar| !contains(scrollbar, x, y))
+    })
 }
 
 /// The columns of the border title drawn on `pane`'s top edge. Titles are padded with a space

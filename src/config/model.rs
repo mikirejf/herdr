@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+};
 
 use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -1003,6 +1006,9 @@ pub struct UiConfig {
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
+    /// Focused pane border color per machine, keyed by the machine label the sidebar shows
+    /// ("Local" or a saved machine's label). Applied by the viewing client. Default: empty.
+    pub machine_focus_colors: BTreeMap<String, String>,
     /// Optional visual toast notifications for background workspace events.
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
@@ -1225,6 +1231,7 @@ impl Default for UiConfig {
             status_indicators: StatusIndicatorStyle::Dots,
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),
+            machine_focus_colors: BTreeMap::new(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }
@@ -1485,6 +1492,29 @@ status_indicators = "symbols"
         )
         .unwrap();
         assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Symbols);
+    }
+
+    #[test]
+    fn machine_focus_colors_default_empty_and_parse() {
+        assert!(Config::default().ui.machine_focus_colors.is_empty());
+        let empty: Config = toml::from_str("[ui.machine_focus_colors]").unwrap();
+        assert!(empty.ui.machine_focus_colors.is_empty());
+
+        let config: Config = toml::from_str(
+            r##"
+[ui.machine_focus_colors]
+"jan-box" = "#99ffe4"
+Local = "magenta"
+"##,
+        )
+        .unwrap();
+        assert_eq!(
+            config.ui.machine_focus_colors,
+            BTreeMap::from([
+                ("Local".to_owned(), "magenta".to_owned()),
+                ("jan-box".to_owned(), "#99ffe4".to_owned()),
+            ])
+        );
     }
 
     #[test]

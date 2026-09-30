@@ -15,6 +15,15 @@ pub(super) fn merged_config_diagnostic(
     }
 }
 
+fn machine_focus_colors(
+    configured: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, ratatui::style::Color> {
+    configured
+        .iter()
+        .map(|(label, color)| (label.clone(), crate::config::parse_color(color)))
+        .collect()
+}
+
 impl ClientShellState {
     pub(super) fn set_local_config_diagnostic(&mut self, diagnostic: Option<String>) {
         self.local_config_diagnostic = diagnostic;
@@ -135,6 +144,7 @@ impl ClientShellConfig {
             theme_name: theme_runtime.manual_name.clone(),
             theme_runtime,
             palette: crate::app::client_palette_from_config(config),
+            machine_focus_colors: machine_focus_colors(&config.ui.machine_focus_colors),
             keybinds: config
                 .live_keybinds_with_diagnostics()
                 .map(|(keybinds, _diagnostics)| keybinds)
@@ -341,6 +351,7 @@ impl ClientShellConfig {
                 self.mouse_scroll_lines = ui.mouse_scroll_lines();
                 self.right_click_passthrough_modifiers = ui.right_click_passthrough_modifiers();
                 self.redraw_on_focus_gained = ui.redraw_on_focus_gained;
+                self.machine_focus_colors = machine_focus_colors(&ui.machine_focus_colors);
             }
         }
 
@@ -492,6 +503,26 @@ mod tests {
         assert_eq!(
             shell.keybinds.prefix,
             vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)]
+        );
+    }
+
+    #[test]
+    fn machine_focus_colors_accept_theme_color_formats() {
+        let mut config = Config::default();
+        config.ui.machine_focus_colors = std::collections::BTreeMap::from([
+            ("jan-box".to_owned(), "#99ffe4".to_owned()),
+            ("Local".to_owned(), "magenta".to_owned()),
+        ]);
+
+        let shell = ClientShellConfig::from_config(&config);
+
+        assert_eq!(
+            shell.machine_focus_colors["jan-box"],
+            ratatui::style::Color::Rgb(0x99, 0xff, 0xe4)
+        );
+        assert_eq!(
+            shell.machine_focus_colors["Local"],
+            ratatui::style::Color::Magenta
         );
     }
 

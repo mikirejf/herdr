@@ -313,6 +313,15 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
+To see at a glance which machine you are looking at, give the focused pane's border a color per machine:
+
+```toml
+[ui.machine_focus_colors]
+"devbox" = "#99ffe4"
+```
+
+Keys are machine labels exactly as the sidebar shows them: `Local` or a saved machine's label. Matching is case-sensitive, and colors accept the same formats as theme colors. The client you are viewing from applies this setting, so one shared `config.toml` works on every machine. Machines without an entry keep the theme accent.
+
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
 Configure an ordered tmux-style status area at the right edge of the tab row:

@@ -1059,6 +1059,29 @@ mouse_captur = true
     }
 
     #[test]
+    fn machine_focus_colors_are_known_config_keys() {
+        const CONTENT: &str = "[ui.machine_focus_colors]\n\"jan-box\" = \"#99ffe4\"\n";
+        let live = load_live_config_from_str(CONTENT).unwrap();
+        assert!(live.diagnostics.is_empty(), "{:?}", live.diagnostics);
+
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-machine-focus-colors-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, CONTENT).unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.config.ui.machine_focus_colors["jan-box"], "#99ffe4");
+    }
+
+    #[test]
     fn startup_config_load_warns_about_unknown_top_level_sections() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let path = std::env::temp_dir().join(format!(

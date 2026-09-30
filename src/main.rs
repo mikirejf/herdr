@@ -339,6 +339,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# Focused pane border color per machine, keyed by the machine label the sidebar shows
+# ("Local" or a saved machine's label). Applied by this client; machines without an
+# entry keep the theme accent.
+# [ui.machine_focus_colors]
+# "devbox" = "#99ffe4"
+
 # Expanded agent rows. Built-ins are state_icon, state_text, machine, workspace, tab,
 # pane, agent, terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.

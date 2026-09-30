@@ -344,11 +344,20 @@ impl ClientShellState {
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         let predicted_surface_frame = self.predicted_pane_surface_frame(surface);
-        blit_pane_surface(
+        let surface_area = blit_pane_surface(
             &mut frame,
             predicted_surface_frame.as_ref().unwrap_or(&surface.frame),
             layout.pane_surface,
         );
+        if let Some((accent, color)) = self.machine_focus_recolor() {
+            crate::ui::recolor_focus_chrome(
+                &mut frame,
+                surface_area,
+                &surface.panes,
+                accent,
+                color,
+            );
+        }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         let has_selection = self

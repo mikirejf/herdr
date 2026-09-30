@@ -16,7 +16,7 @@ pub(crate) use self::onboarding::{
     ONBOARDING_HELP_SUFFIX, ONBOARDING_NEXT, ONBOARDING_PREFIX_LABEL, ONBOARDING_PREFIX_SUFFIX,
     ONBOARDING_SUBTITLE, ONBOARDING_TITLE,
 };
-pub(crate) use self::pane_focus::restyle_pane_surface_focus;
+pub(crate) use self::pane_focus::{recolor_focus_chrome, restyle_pane_surface_focus};
 #[cfg(all(test, unix))]
 pub(crate) use self::panes::popup_pane_rects;
 use self::panes::resize_popup_pane;

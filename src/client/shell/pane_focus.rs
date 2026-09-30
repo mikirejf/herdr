@@ -114,6 +114,23 @@ impl ClientShellState {
         }
     }
 
+    /// The endpoint's focus accent and the color this client presents it in for the active
+    /// machine, or `None` when the machine has no `ui.machine_focus_colors` entry.
+    pub(super) fn machine_focus_recolor(&self) -> Option<(u32, u32)> {
+        if self.config.machine_focus_colors.is_empty() {
+            return None;
+        }
+        let color = self
+            .config
+            .machine_focus_colors
+            .get(self.active_endpoint_label())?;
+        let accent = self.snapshot.as_deref()?.pane_focus_style?.colors().accent;
+        Some((
+            crate::protocol::color_to_u32(accent),
+            crate::protocol::color_to_u32(*color),
+        ))
+    }
+
     /// The presented surface restyled for the predicted focus, or `None` when the surface
     /// already shows the focus the shell presents.
     pub(super) fn predicted_pane_surface_frame(

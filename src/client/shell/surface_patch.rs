@@ -161,6 +161,9 @@ impl ClientShellState {
                 return self.rejected_patch_outcome(&patch);
             }
         }
+        // Rows stay inside terminal and scrollbar cells. The fast path presents them without
+        // recomposing, so pane chrome, including its machine focus color, only changes through
+        // a full compose.
         for row in &patch.rows {
             if !row_fits_frame(row, &current.frame)
                 || row.cells.is_empty()

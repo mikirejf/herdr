@@ -1089,6 +1089,12 @@
           "type": "color",
           "default": "\"cyan\"",
           "description": "Accent color for highlights, borders, and navigation UI. Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250))."
+        },
+        {
+          "key": "ui.machine_focus_colors",
+          "type": "table of colors",
+          "default": "{}",
+          "description": "Focused pane border color per machine, keyed by the case-sensitive machine label the sidebar shows (\"Local\" or a saved machine's label). Applied by the viewing client; machines without an entry keep the theme accent."
         }
       ]
     },
