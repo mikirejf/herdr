@@ -33,10 +33,14 @@ impl BackgroundSurface {
         boot_id: String,
         resize: ClientMessage,
         surface: Option<PaneSurfaceFrame>,
+        modes: [ServerMessage; 2],
     ) -> Self {
         let mut evidence = ActivationEvidence::default();
         if let Some(surface) = surface.filter(|surface| surface.boot_id == boot_id) {
             evidence.record_surface(surface);
+        }
+        for mode in modes {
+            evidence.record_effect(mode);
         }
         Self {
             boot_id,
@@ -83,8 +87,8 @@ impl BackgroundSurface {
         }
     }
 
-    /// The kept surface and host modes, when they prove the endpoint's current presentation for
-    /// this geometry and navigation target. Otherwise, the checks that failed.
+    /// The kept surface and host modes, when the surface proves the endpoint's current
+    /// presentation for this geometry and navigation target. Otherwise, the checks that failed.
     pub(super) fn presentable(
         &self,
         shell: &crate::client::shell::ClientShellState,
@@ -108,12 +112,6 @@ impl BackgroundSurface {
         };
         let effects = self.evidence.effects.as_slice();
         miss.resize = *resize != self.resize;
-        miss.modes = !(effects
-            .iter()
-            .any(|effect| matches!(effect, ServerMessage::MouseCapture { .. }))
-            && effects.iter().any(|effect| {
-                matches!(effect, ServerMessage::ClientShellKeyboardReportAll { .. })
-            }));
         miss.boot_id = snapshot.boot_id != self.boot_id;
         miss.revision = snapshot.revision != surface.projection_revision;
         miss.geometry = !surface_matches_geometry(surface, geometry);
@@ -151,7 +149,6 @@ pub(crate) struct BackgroundMiss {
     surface: bool,
     snapshot: bool,
     resize: bool,
-    modes: bool,
     boot_id: bool,
     revision: bool,
     geometry: bool,
@@ -165,7 +162,6 @@ impl std::fmt::Display for BackgroundMiss {
             (self.surface, "surface"),
             (self.snapshot, "snapshot"),
             (self.resize, "resize"),
-            (self.modes, "modes"),
             (self.boot_id, "boot_id"),
             (self.revision, "revision"),
             (self.geometry, "geometry"),

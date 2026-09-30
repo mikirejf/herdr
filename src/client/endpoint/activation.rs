@@ -71,13 +71,14 @@ fn release_source(
     );
 }
 
-/// The presenting source's surface, seeded from what the shell shows, when the source should
-/// keep streaming after it is released.
+/// The presenting source's surface and modes, seeded from what the client shows and holds, when
+/// the source should keep streaming after it is released.
 fn source_background(
     shell: &crate::client::shell::ClientShellState,
     source: &EndpointLease,
     target: &ClientEndpointId,
     resize: &crate::protocol::ClientMessage,
+    modes: [crate::protocol::ServerMessage; 2],
 ) -> Option<BackgroundSurface> {
     (!source.endpoint_id.is_local()
         && source.endpoint_id != *target
@@ -87,6 +88,7 @@ fn source_background(
             source.boot_id.clone(),
             resize.clone(),
             shell.followed_pane_surface().cloned(),
+            modes,
         )
     })
 }
@@ -102,6 +104,7 @@ pub(crate) fn present_background_surface(
     focus: Option<&crate::client::shell::ClientEndpointFocusTarget>,
     resize: &crate::protocol::ClientMessage,
     serial: u64,
+    source_modes: [crate::protocol::ServerMessage; 2],
 ) -> Result<CommittedActivation, WarmPathMiss> {
     let generation = endpoints
         .connection(target)
@@ -136,7 +139,7 @@ pub(crate) fn present_background_surface(
         }
     }
     if let Some(source) = source {
-        let background = source_background(shell, &source, target, resize);
+        let background = source_background(shell, &source, target, resize, source_modes);
         release_source(
             &source,
             background,
@@ -177,6 +180,7 @@ impl PendingEndpointActivation {
         resize: crate::protocol::ClientMessage,
         serial: u64,
         warm_path: WarmPathMiss,
+        source_modes: [crate::protocol::ServerMessage; 2],
         now: Instant,
     ) -> Result<Self, ActivationBeginError> {
         resize_geometry(&resize).ok_or_else(|| {
@@ -240,7 +244,15 @@ impl PendingEndpointActivation {
 
         let focus_acknowledged = focus.is_none();
         let source_background = source_available
-            .then(|| source_background(shell, &source, &target_lease.endpoint_id, &resize))
+            .then(|| {
+                source_background(
+                    shell,
+                    &source,
+                    &target_lease.endpoint_id,
+                    &resize,
+                    source_modes,
+                )
+            })
             .flatten();
         Ok(Self {
             source_background,
@@ -304,6 +316,35 @@ impl PendingEndpointActivation {
         serial: u64,
         now: Instant,
     ) -> Result<Self, ActivationBeginError> {
+        Self::begin_with_modes(
+            shell,
+            endpoints,
+            target,
+            focus,
+            resize,
+            serial,
+            [
+                crate::protocol::ServerMessage::MouseCapture {
+                    enabled: false,
+                    sgr_pixels: false,
+                },
+                crate::protocol::ServerMessage::ClientShellKeyboardReportAll { enabled: false },
+            ],
+            now,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_with_modes(
+        shell: &crate::client::shell::ClientShellState,
+        endpoints: &mut EndpointRegistry,
+        target: ClientEndpointId,
+        focus: Option<crate::client::shell::ClientEndpointFocusTarget>,
+        resize: crate::protocol::ClientMessage,
+        serial: u64,
+        source_modes: [crate::protocol::ServerMessage; 2],
+        now: Instant,
+    ) -> Result<Self, ActivationBeginError> {
         Self::prepare(
             shell,
             endpoints,
@@ -312,6 +353,7 @@ impl PendingEndpointActivation {
             resize,
             serial,
             WarmPathMiss::NotKept,
+            source_modes,
             now,
         )?
         .start(endpoints)

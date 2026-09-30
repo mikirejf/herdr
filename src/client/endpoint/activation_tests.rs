@@ -1960,6 +1960,12 @@ fn is_control(message: &crate::protocol::ClientMessage, expected: &str) -> bool 
 /// The remote presented, then left for Local. Returns the fixture with Local committed and the
 /// remote streaming in the background.
 fn local_with_background_remote() -> TestFixture {
+    local_with_background_remote_seeded([mouse_capture(false), keyboard_report_all(false)])
+}
+
+/// Like `local_with_background_remote`, with the modes the client held for the remote when it
+/// left it.
+fn local_with_background_remote_seeded(modes: [crate::protocol::ServerMessage; 2]) -> TestFixture {
     let (mut shell, mut endpoints, local_sent, remote_sent) = shell_and_registry();
     let remote = endpoint();
     endpoints.set_surface_active(&ClientEndpointId::Local, false);
@@ -1968,13 +1974,14 @@ fn local_with_background_remote() -> TestFixture {
     assert!(shell.activate_endpoint_projection(&remote));
     shell.set_pane_surface(surface("remote-boot", 1, "remote-pane"));
 
-    let mut activation = PendingEndpointActivation::begin(
+    let mut activation = PendingEndpointActivation::begin_with_modes(
         &shell,
         &mut endpoints,
         ClientEndpointId::Local,
         None,
         resize(),
         3,
+        modes,
         Instant::now(),
     )
     .unwrap();
@@ -2004,6 +2011,50 @@ fn local_with_background_remote() -> TestFixture {
     assert_eq!(endpoints.active_id(), &ClientEndpointId::Local);
     local_sent.lock().unwrap().clear();
     (shell, endpoints, local_sent, remote_sent)
+}
+
+fn present_remote_at_once(
+    shell: &mut crate::client::ClientShellState,
+    endpoints: &mut EndpointRegistry,
+) -> Result<CommittedActivation, WarmPathMiss> {
+    present_background_surface(
+        shell,
+        endpoints,
+        &endpoint(),
+        None,
+        &resize(),
+        9,
+        [mouse_capture(false), keyboard_report_all(false)],
+    )
+}
+
+#[test]
+fn returning_before_the_remote_resends_its_modes_presents_the_modes_held_when_leaving() {
+    let held = [mouse_capture(true), keyboard_report_all(true)];
+    let (mut shell, mut endpoints, _local_sent, _remote_sent) =
+        local_with_background_remote_seeded(held.clone());
+
+    let committed = present_remote_at_once(&mut shell, &mut endpoints)
+        .expect("the modes held when leaving make the surface presentable");
+
+    assert_eq!(committed.effects, held);
+}
+
+#[test]
+fn a_mode_change_followed_in_the_background_replaces_the_seeded_mode() {
+    let (mut shell, mut endpoints, _local_sent, _remote_sent) =
+        local_with_background_remote_seeded([mouse_capture(true), keyboard_report_all(true)]);
+    assert!(endpoints
+        .follow_background_surface(&endpoint(), 7, Box::new(mouse_capture(false)))
+        .is_none());
+
+    let committed = present_remote_at_once(&mut shell, &mut endpoints)
+        .expect("a followed mode change keeps the surface presentable");
+
+    assert_eq!(
+        committed.effects,
+        vec![keyboard_report_all(true), mouse_capture(false)]
+    );
 }
 
 #[test]
@@ -2048,9 +2099,8 @@ fn returning_to_a_background_remote_commits_before_any_reply() {
     }
     remote_sent.lock().unwrap().clear();
 
-    let committed =
-        present_background_surface(&mut shell, &mut endpoints, &remote, None, &resize(), 9)
-            .expect("a current background surface commits at once");
+    let committed = present_remote_at_once(&mut shell, &mut endpoints)
+        .expect("a current background surface commits at once");
 
     assert_eq!(committed.endpoint_id, remote);
     assert_eq!(committed.completion, ActivationCompletion::Activated);
@@ -2099,25 +2149,17 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
         crate::protocol::ClientMessage,
         Option<crate::client::shell::ClientEndpointFocusTarget>,
         &str,
-    ); 4] = [
-        (
-            "modes not yet streamed",
-            |_, _| {},
-            resize(),
-            None,
-            "stale:modes",
-        ),
+    ); 3] = [
         (
             "geometry changed",
-            modes_streamed,
+            |_, _| {},
             other_geometry,
             None,
             "stale:resize+geometry",
         ),
         (
             "snapshot ahead of the kept surface",
-            |shell, endpoints| {
-                modes_streamed(shell, endpoints);
+            |shell, _| {
                 shell.cache_endpoint_snapshot_inactive_for_generation(
                     &endpoint(),
                     7,
@@ -2130,7 +2172,7 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
         ),
         (
             "navigation to a workspace the surface does not show",
-            modes_streamed,
+            |_, _| {},
             resize(),
             Some(crate::client::shell::ClientEndpointFocusTarget::Workspace(
                 "elsewhere".into(),
@@ -2151,6 +2193,7 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
             focus.as_ref(),
             &geometry,
             9,
+            [mouse_capture(false), keyboard_report_all(false)],
         )
         .expect_err(case);
         assert_eq!(
@@ -2184,13 +2227,5 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
                 .any(|message| surface_set_active(message) == Some(true)),
             "{case}"
         );
-    }
-}
-
-fn modes_streamed(_shell: &mut crate::client::ClientShellState, endpoints: &mut EndpointRegistry) {
-    for message in [mouse_capture(false), keyboard_report_all(false)] {
-        assert!(endpoints
-            .follow_background_surface(&endpoint(), 7, Box::new(message))
-            .is_none());
     }
 }

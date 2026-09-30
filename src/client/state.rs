@@ -97,6 +97,19 @@ impl Drop for ClientState {
 }
 
 impl ClientState {
+    /// The modes the presenting endpoint last asked for, without this client's local overrides.
+    pub(super) fn endpoint_modes(&self) -> [crate::protocol::ServerMessage; 2] {
+        [
+            crate::protocol::ServerMessage::MouseCapture {
+                enabled: self.endpoint_mouse_capture_requested,
+                sgr_pixels: self.endpoint_sgr_pixels_requested,
+            },
+            crate::protocol::ServerMessage::ClientShellKeyboardReportAll {
+                enabled: self.pane_keyboard_report_all,
+            },
+        ]
+    }
+
     #[cfg(test)]
     pub(super) fn test_new() -> Self {
         Self {

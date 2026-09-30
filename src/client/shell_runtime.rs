@@ -296,6 +296,7 @@ pub(super) fn begin_endpoint_activation(
         state.reported_cell_size.1,
         state.pixel_geometry_exact,
     );
+    let source_modes = state.endpoint_modes();
     let mut warm_path = endpoint::WarmPathMiss::NotKept;
     if pending.is_none() {
         let source_id = endpoints.active_id().clone();
@@ -307,6 +308,7 @@ pub(super) fn begin_endpoint_activation(
             target.as_ref(),
             &resize,
             *next_surface_serial,
+            source_modes.clone(),
         ) {
             Err(miss) => warm_path = miss,
             Ok(committed) => {
@@ -342,6 +344,7 @@ pub(super) fn begin_endpoint_activation(
         resize,
         *next_surface_serial,
         warm_path,
+        source_modes,
         now,
     )
     .and_then(|activation| {

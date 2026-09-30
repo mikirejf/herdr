@@ -1258,6 +1258,13 @@ async fn two_headless_servers_return_to_a_background_remote_without_a_round_trip
         None,
         &lifecycle_resize(),
         42,
+        [
+            ServerMessage::MouseCapture {
+                enabled: false,
+                sgr_pixels: false,
+            },
+            ServerMessage::ClientShellKeyboardReportAll { enabled: false },
+        ],
     )
     .expect("the followed remote surface commits at once");
     assert_eq!(endpoints.active_id(), &remote_id);
