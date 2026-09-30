@@ -136,6 +136,16 @@ pub(super) enum ActivationPhase {
     },
 }
 
+impl ActivationPhase {
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            Self::ActivatingTarget { .. } => "activating_target",
+            Self::ReleasingTargetForRollback { .. } => "releasing_target",
+            Self::RestoringSource { .. } => "restoring_source",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SurfaceActivationProgress {
     Pending,
@@ -258,6 +268,9 @@ pub(crate) struct PendingEndpointActivation {
     pub(super) resize: crate::protocol::ClientMessage,
     pub(super) phase: ActivationPhase,
     pub(super) deadline: Instant,
+    pub(super) started: Instant,
+    /// Why the target's kept background surface was not presented instead of this activation.
+    pub(super) warm_path: super::WarmPathMiss,
     pub(super) epoch: u64,
     pub(super) next_focus_serial: u64,
     pub(super) rollback_error: Option<String>,

@@ -296,10 +296,11 @@ pub(super) fn begin_endpoint_activation(
         state.reported_cell_size.1,
         state.pixel_geometry_exact,
     );
+    let mut warm_path = endpoint::WarmPathMiss::NotKept;
     if pending.is_none() {
         let source_id = endpoints.active_id().clone();
         let shell = state.shell.as_mut().expect("checked client shell");
-        if let Some(committed) = endpoint::present_background_surface(
+        match endpoint::present_background_surface(
             shell,
             endpoints,
             &endpoint_id,
@@ -307,24 +308,27 @@ pub(super) fn begin_endpoint_activation(
             &resize,
             *next_surface_serial,
         ) {
-            *next_surface_serial = next_surface_serial.saturating_add(1);
-            // Like a full handoff, commands still queued for the source must not land after it
-            // stopped presenting.
-            let retired = if source_id != endpoint_id {
-                endpoint_commands.retire_lane(&source_id)
-            } else {
-                Default::default()
-            };
-            for request_id in retired {
-                shell.cancel_endpoint_request(&request_id);
+            Err(miss) => warm_path = miss,
+            Ok(committed) => {
+                *next_surface_serial = next_surface_serial.saturating_add(1);
+                // Like a full handoff, commands still queued for the source must not land after it
+                // stopped presenting.
+                let retired = if source_id != endpoint_id {
+                    endpoint_commands.retire_lane(&source_id)
+                } else {
+                    Default::default()
+                };
+                for request_id in retired {
+                    shell.cancel_endpoint_request(&request_id);
+                }
+                state.replay_host_theme(endpoints, &endpoint_id);
+                if let Some(event) =
+                    present_committed_activation(state, endpoints, endpoint_commands, committed)?
+                {
+                    *scheduled_activation = Some(event);
+                }
+                return Ok(());
             }
-            state.replay_host_theme(endpoints, &endpoint_id);
-            if let Some(event) =
-                present_committed_activation(state, endpoints, endpoint_commands, committed)?
-            {
-                *scheduled_activation = Some(event);
-            }
-            return Ok(());
         }
     }
     let Some(shell) = state.shell.as_ref() else {
@@ -337,6 +341,7 @@ pub(super) fn begin_endpoint_activation(
         target,
         resize,
         *next_surface_serial,
+        warm_path,
         now,
     )
     .and_then(|activation| {

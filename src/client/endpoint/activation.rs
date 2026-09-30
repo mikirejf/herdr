@@ -5,7 +5,7 @@ use super::{ClientEndpointId, ClientEndpointStatus, EndpointRegistry, EndpointSe
 mod background;
 mod model;
 mod protocol;
-pub(crate) use background::{BackgroundDelivery, BackgroundSurface};
+pub(crate) use background::{BackgroundDelivery, BackgroundSurface, WarmPathMiss};
 pub(crate) use model::{
     ActivationBeginError, ActivationCompletion, ActivationRollback, CommittedActivation,
     EndpointActivationIntent, PendingEndpointActivation, SurfaceActivationProgress,
@@ -14,6 +14,9 @@ use model::{ActivationEvidence, ActivationPhase, BufferedInput, EndpointLease};
 use protocol::*;
 
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// A switch that commits later than this is written to the client log, so a freeze noticed in
+/// use can be diagnosed afterwards. Healthy switches take one round trip.
+const SLOW_ACTIVATION: Duration = Duration::from_secs(1);
 
 fn release_surface_best_effort(
     lease: &EndpointLease,
@@ -89,7 +92,7 @@ fn source_background(
 }
 
 /// Present a background endpoint's kept surface at once, then tell the endpoint it presents
-/// again. Returns `None`, with the presentation unchanged, when the kept surface cannot be proven
+/// again. Returns why not, with the presentation unchanged, when the kept surface cannot be proven
 /// current or the endpoint cannot be reached; the caller then runs a full activation, which also
 /// reports a lost connection.
 pub(crate) fn present_background_surface(
@@ -99,11 +102,16 @@ pub(crate) fn present_background_surface(
     focus: Option<&crate::client::shell::ClientEndpointFocusTarget>,
     resize: &crate::protocol::ClientMessage,
     serial: u64,
-) -> Option<CommittedActivation> {
-    let generation = endpoints.connection(target)?.generation;
+) -> Result<CommittedActivation, WarmPathMiss> {
+    let generation = endpoints
+        .connection(target)
+        .ok_or(WarmPathMiss::NotKept)?
+        .generation;
     let (surface, effects) = endpoints
-        .background_surface(target)?
-        .presentable(shell, target, generation, resize, focus)?;
+        .background_surface(target)
+        .ok_or(WarmPathMiss::NotKept)?
+        .presentable(shell, target, generation, resize, focus)
+        .map_err(WarmPathMiss::Unpresentable)?;
     let (surface, effects) = (surface.clone(), effects.to_vec());
     let source_id = endpoints.active_id().clone();
     let source = endpoints
@@ -124,7 +132,7 @@ pub(crate) fn present_background_surface(
         },
     ] {
         if endpoints.send_to(target, &message) != EndpointSendOutcome::Sent {
-            return None;
+            return Err(WarmPathMiss::Unsent);
         }
     }
     if let Some(source) = source {
@@ -151,7 +159,7 @@ pub(crate) fn present_background_surface(
         "a presentable endpoint has a snapshot"
     );
     shell.set_pane_surface(surface);
-    Some(CommittedActivation {
+    Ok(CommittedActivation {
         completion: ActivationCompletion::Activated,
         endpoint_id: target.clone(),
         generation,
@@ -168,6 +176,7 @@ impl PendingEndpointActivation {
         focus: Option<crate::client::shell::ClientEndpointFocusTarget>,
         resize: crate::protocol::ClientMessage,
         serial: u64,
+        warm_path: WarmPathMiss,
         now: Instant,
     ) -> Result<Self, ActivationBeginError> {
         resize_geometry(&resize).ok_or_else(|| {
@@ -250,6 +259,8 @@ impl PendingEndpointActivation {
                 evidence: ActivationEvidence::default(),
             },
             deadline: now + ACTIVATION_TIMEOUT,
+            started: now,
+            warm_path,
             epoch: serial,
             next_focus_serial: 0,
             rollback_error: None,
@@ -293,10 +304,24 @@ impl PendingEndpointActivation {
         serial: u64,
         now: Instant,
     ) -> Result<Self, ActivationBeginError> {
-        Self::prepare(shell, endpoints, target, focus, resize, serial, now)?.start(endpoints)
+        Self::prepare(
+            shell,
+            endpoints,
+            target,
+            focus,
+            resize,
+            serial,
+            WarmPathMiss::NotKept,
+            now,
+        )?
+        .start(endpoints)
     }
 
     pub(crate) fn abandon(&self, endpoints: &mut EndpointRegistry) {
+        if self.started.elapsed() >= SLOW_ACTIVATION {
+            self.report()
+                .warn("endpoint activation abandoned", None, "abandoned");
+        }
         endpoints.freeze_input();
         for lease in [&self.source, &self.target] {
             release_surface_best_effort(
@@ -680,6 +705,22 @@ impl PendingEndpointActivation {
         endpoint_id: &ClientEndpointId,
         error: String,
     ) -> ActivationRollback {
+        let report = self.report();
+        let rollback = self.lose_endpoint(endpoints, endpoint_id, error);
+        report.warn(
+            "endpoint activation lost an endpoint",
+            self.rollback_error.as_deref(),
+            self.rollback_outcome(&rollback),
+        );
+        rollback
+    }
+
+    fn lose_endpoint(
+        &mut self,
+        endpoints: &mut EndpointRegistry,
+        endpoint_id: &ClientEndpointId,
+        error: String,
+    ) -> ActivationRollback {
         self.rollback_error = Some(error.clone());
         if self.target.endpoint_id == *endpoint_id && self.source.endpoint_id != *endpoint_id {
             return match self.phase {
@@ -716,6 +757,21 @@ impl PendingEndpointActivation {
     }
 
     pub(crate) fn rollback(
+        &mut self,
+        endpoints: &mut EndpointRegistry,
+        error: String,
+    ) -> ActivationRollback {
+        let report = self.report();
+        let rollback = self.start_rollback(endpoints, error);
+        report.warn(
+            "endpoint activation rolled back",
+            self.rollback_error.as_deref(),
+            self.rollback_outcome(&rollback),
+        );
+        rollback
+    }
+
+    fn start_rollback(
         &mut self,
         endpoints: &mut EndpointRegistry,
         error: String,
@@ -757,6 +813,33 @@ impl PendingEndpointActivation {
     /// Commit the collected frame. Input opens with this frame: nothing about the endpoint's
     /// presentation is still outstanding once its snapshot, surface and replies have arrived.
     pub(crate) fn complete(
+        &mut self,
+        shell: &mut crate::client::shell::ClientShellState,
+        endpoints: &mut EndpointRegistry,
+    ) -> Result<CommittedActivation, String> {
+        let committed = self.commit(shell, endpoints);
+        match committed.as_ref().map(|committed| &committed.completion) {
+            Ok(ActivationCompletion::Activated) => {
+                if self.started.elapsed() >= SLOW_ACTIVATION {
+                    self.report()
+                        .warn("slow endpoint activation", None, "activated");
+                }
+            }
+            Ok(ActivationCompletion::RestoredSource { error, .. }) => self.report().warn(
+                "endpoint activation restored the previous endpoint",
+                Some(error),
+                "restored_source",
+            ),
+            Err(error) => self.report().warn(
+                "endpoint activation could not commit",
+                Some(error),
+                "unavailable",
+            ),
+        }
+        committed
+    }
+
+    fn commit(
         &mut self,
         shell: &mut crate::client::shell::ClientShellState,
         endpoints: &mut EndpointRegistry,
@@ -826,6 +909,66 @@ impl PendingEndpointActivation {
             effects,
             input,
         })
+    }
+
+    fn rollback_outcome(&self, rollback: &ActivationRollback) -> &'static str {
+        match rollback {
+            ActivationRollback::Pending => self.phase.name(),
+            ActivationRollback::Unavailable(_) => "unavailable",
+        }
+    }
+
+    /// What this activation has received so far. Built only for a slow or failed switch.
+    fn report(&self) -> ActivationReport {
+        let (acknowledged_revision, focus_acknowledged, focus_request_id, evidence) =
+            match &self.phase {
+                ActivationPhase::ActivatingTarget {
+                    acknowledged_revision,
+                    focus_acknowledged,
+                    focus_request_id,
+                    evidence,
+                    ..
+                } => (
+                    *acknowledged_revision,
+                    Some(*focus_acknowledged),
+                    focus_request_id.clone(),
+                    Some(evidence),
+                ),
+                ActivationPhase::RestoringSource {
+                    acknowledged_revision,
+                    evidence,
+                    ..
+                } => (*acknowledged_revision, None, None, Some(evidence)),
+                ActivationPhase::ReleasingTargetForRollback { .. } => (None, None, None, None),
+            };
+        let geometry = self.geometry();
+        ActivationReport {
+            endpoint: self.target.endpoint_id.storage_key(),
+            source: self.source.endpoint_id.storage_key(),
+            epoch: self.epoch,
+            generation: self.target.generation,
+            elapsed_ms: self.started.elapsed().as_millis(),
+            phase: self.phase.name(),
+            warm_path: self.warm_path,
+            acknowledged_revision,
+            focus_acknowledged,
+            focus_request_id,
+            snapshot_revision: evidence.and_then(|evidence| evidence.snapshot_revision),
+            focused_workspace_id: evidence
+                .and_then(|evidence| evidence.focused_workspace_id.clone()),
+            surface: evidence
+                .and_then(|evidence| evidence.surface.as_ref())
+                .map(|surface| {
+                    format!(
+                        "{}/{} {}x{}",
+                        surface.projection_revision,
+                        surface.surface_revision,
+                        surface.frame.width,
+                        surface.frame.height
+                    )
+                }),
+            geometry: format!("{}x{}", geometry.cols, geometry.rows),
+        }
     }
 
     fn start_target(&mut self, endpoints: &mut EndpointRegistry) -> Result<(), String> {
@@ -994,6 +1137,49 @@ impl PendingEndpointActivation {
             }
             None => true,
         }
+    }
+}
+
+/// One activation's state for the client log. `surface` is `projection/surface WxH`, to compare
+/// against the expected `geometry`.
+struct ActivationReport {
+    endpoint: String,
+    source: String,
+    epoch: u64,
+    generation: u64,
+    elapsed_ms: u128,
+    phase: &'static str,
+    warm_path: WarmPathMiss,
+    acknowledged_revision: Option<u64>,
+    focus_acknowledged: Option<bool>,
+    focus_request_id: Option<String>,
+    snapshot_revision: Option<u64>,
+    focused_workspace_id: Option<String>,
+    surface: Option<String>,
+    geometry: String,
+}
+
+impl ActivationReport {
+    fn warn(self, message: &str, error: Option<&str>, outcome: &str) {
+        tracing::warn!(
+            endpoint = %self.endpoint,
+            source = %self.source,
+            epoch = self.epoch,
+            generation = self.generation,
+            elapsed_ms = self.elapsed_ms,
+            phase = self.phase,
+            warm_path = %self.warm_path,
+            acknowledged_revision = ?self.acknowledged_revision,
+            focus_acknowledged = ?self.focus_acknowledged,
+            focus_request_id = ?self.focus_request_id,
+            snapshot_revision = ?self.snapshot_revision,
+            focused_workspace = ?self.focused_workspace_id,
+            surface = ?self.surface,
+            geometry = %self.geometry,
+            error = ?error,
+            outcome,
+            "{message}"
+        );
     }
 }
 

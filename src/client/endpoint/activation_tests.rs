@@ -252,6 +252,8 @@ fn machine() -> PendingEndpointActivation {
             evidence: ActivationEvidence::default(),
         },
         deadline: Instant::now() + ACTIVATION_TIMEOUT,
+        started: Instant::now(),
+        warm_path: WarmPathMiss::NotKept,
         epoch: 3,
         next_focus_serial: 0,
         rollback_error: None,
@@ -2051,9 +2053,22 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
         Stale,
         crate::protocol::ClientMessage,
         Option<crate::client::shell::ClientEndpointFocusTarget>,
+        &str,
     ); 4] = [
-        ("modes not yet streamed", |_, _| {}, resize(), None),
-        ("geometry changed", modes_streamed, other_geometry, None),
+        (
+            "modes not yet streamed",
+            |_, _| {},
+            resize(),
+            None,
+            "stale:modes",
+        ),
+        (
+            "geometry changed",
+            modes_streamed,
+            other_geometry,
+            None,
+            "stale:resize+geometry",
+        ),
         (
             "snapshot ahead of the kept surface",
             |shell, endpoints| {
@@ -2066,6 +2081,7 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
             },
             resize(),
             None,
+            "stale:revision",
         ),
         (
             "navigation to a workspace the surface does not show",
@@ -2074,25 +2090,28 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
             Some(crate::client::shell::ClientEndpointFocusTarget::Workspace(
                 "elsewhere".into(),
             )),
+            "stale:focus",
         ),
     ];
-    for (case, make_stale, geometry, focus) in cases {
+    for (case, make_stale, geometry, focus, reported) in cases {
         let (mut shell, mut endpoints, local_sent, remote_sent) = local_with_background_remote();
         let remote = endpoint();
         make_stale(&mut shell, &mut endpoints);
         remote_sent.lock().unwrap().clear();
 
-        assert!(
-            present_background_surface(
-                &mut shell,
-                &mut endpoints,
-                &remote,
-                focus.as_ref(),
-                &geometry,
-                9
-            )
-            .is_none(),
-            "{case}"
+        let miss = present_background_surface(
+            &mut shell,
+            &mut endpoints,
+            &remote,
+            focus.as_ref(),
+            &geometry,
+            9,
+        )
+        .expect_err(case);
+        assert_eq!(
+            miss.to_string(),
+            reported,
+            "{case}: the client log names the failed check"
         );
         assert_eq!(endpoints.active_id(), &ClientEndpointId::Local, "{case}");
         assert!(remote_sent.lock().unwrap().is_empty(), "{case}");

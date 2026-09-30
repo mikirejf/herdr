@@ -84,7 +84,7 @@ impl BackgroundSurface {
     }
 
     /// The kept surface and host modes, when they prove the endpoint's current presentation for
-    /// this geometry and navigation target.
+    /// this geometry and navigation target. Otherwise, the checks that failed.
     pub(super) fn presentable(
         &self,
         shell: &crate::client::shell::ClientShellState,
@@ -92,42 +92,115 @@ impl BackgroundSurface {
         generation: u64,
         resize: &ClientMessage,
         focus: Option<&crate::client::shell::ClientEndpointFocusTarget>,
-    ) -> Option<(&PaneSurfaceFrame, &[ServerMessage])> {
-        let surface = self.evidence.surface.as_ref()?;
-        let snapshot = shell.endpoint_snapshot(endpoint_id, generation)?;
-        let geometry = resize_geometry(resize)?;
+    ) -> Result<(&PaneSurfaceFrame, &[ServerMessage]), BackgroundMiss> {
+        let mut miss = BackgroundMiss::default();
+        let Some(surface) = self.evidence.surface.as_ref() else {
+            miss.surface = true;
+            return Err(miss);
+        };
+        let Some(snapshot) = shell.endpoint_snapshot(endpoint_id, generation) else {
+            miss.snapshot = true;
+            return Err(miss);
+        };
+        let Some(geometry) = resize_geometry(resize) else {
+            miss.resize = true;
+            return Err(miss);
+        };
         let effects = self.evidence.effects.as_slice();
-        let has_modes = effects
+        miss.resize = *resize != self.resize;
+        miss.modes = !(effects
             .iter()
             .any(|effect| matches!(effect, ServerMessage::MouseCapture { .. }))
-            && effects
-                .iter()
-                .any(|effect| matches!(effect, ServerMessage::ClientShellKeyboardReportAll { .. }));
+            && effects.iter().any(|effect| {
+                matches!(effect, ServerMessage::ClientShellKeyboardReportAll { .. })
+            }));
+        miss.boot_id = snapshot.boot_id != self.boot_id;
+        miss.revision = snapshot.revision != surface.projection_revision;
+        miss.geometry = !surface_matches_geometry(surface, geometry);
         // Native graphics are uploaded only to a presenting connection, so a surface with images
         // needs the endpoint's full activation.
-        let presentable = *resize == self.resize
-            && has_modes
-            && snapshot.boot_id == self.boot_id
-            && snapshot.revision == surface.projection_revision
-            && surface_matches_geometry(surface, geometry)
-            && surface.graphics.placements.is_empty()
-            && surface.graphics.retained_assets.is_empty()
-            && match focus {
-                None => true,
-                Some(crate::client::shell::ClientEndpointFocusTarget::Workspace(id)) => {
-                    snapshot.focused_workspace_id.as_ref() == Some(id)
-                }
-                Some(crate::client::shell::ClientEndpointFocusTarget::Tab(id)) => {
-                    snapshot.focused_tab_id.as_ref() == Some(id)
-                }
-                Some(crate::client::shell::ClientEndpointFocusTarget::Pane(id)) => {
-                    snapshot.focused_pane_id.as_ref() == Some(id)
-                        && surface
-                            .panes
-                            .iter()
-                            .any(|pane| pane.focused && &pane.pane_id == id)
-                }
-            };
-        presentable.then_some((surface, effects))
+        miss.graphics =
+            !surface.graphics.placements.is_empty() || !surface.graphics.retained_assets.is_empty();
+        miss.focus = !match focus {
+            None => true,
+            Some(crate::client::shell::ClientEndpointFocusTarget::Workspace(id)) => {
+                snapshot.focused_workspace_id.as_ref() == Some(id)
+            }
+            Some(crate::client::shell::ClientEndpointFocusTarget::Tab(id)) => {
+                snapshot.focused_tab_id.as_ref() == Some(id)
+            }
+            Some(crate::client::shell::ClientEndpointFocusTarget::Pane(id)) => {
+                snapshot.focused_pane_id.as_ref() == Some(id)
+                    && surface
+                        .panes
+                        .iter()
+                        .any(|pane| pane.focused && &pane.pane_id == id)
+            }
+        };
+        if miss == BackgroundMiss::default() {
+            Ok((surface, effects))
+        } else {
+            Err(miss)
+        }
+    }
+}
+
+/// The checks that kept a background surface from being presented at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BackgroundMiss {
+    surface: bool,
+    snapshot: bool,
+    resize: bool,
+    modes: bool,
+    boot_id: bool,
+    revision: bool,
+    geometry: bool,
+    graphics: bool,
+    focus: bool,
+}
+
+impl std::fmt::Display for BackgroundMiss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let failed = [
+            (self.surface, "surface"),
+            (self.snapshot, "snapshot"),
+            (self.resize, "resize"),
+            (self.modes, "modes"),
+            (self.boot_id, "boot_id"),
+            (self.revision, "revision"),
+            (self.geometry, "geometry"),
+            (self.graphics, "graphics"),
+            (self.focus, "focus"),
+        ]
+        .into_iter()
+        .filter_map(|(failed, check)| failed.then_some(check));
+        for (index, check) in failed.enumerate() {
+            if index > 0 {
+                f.write_str("+")?;
+            }
+            f.write_str(check)?;
+        }
+        Ok(())
+    }
+}
+
+/// Why a switch ran a full activation instead of presenting a kept background surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WarmPathMiss {
+    /// This connection keeps no background surface for the endpoint.
+    NotKept,
+    /// The kept surface failed these checks.
+    Unpresentable(BackgroundMiss),
+    /// The endpoint could not be told that it presents again.
+    Unsent,
+}
+
+impl std::fmt::Display for WarmPathMiss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotKept => f.write_str("not_kept"),
+            Self::Unpresentable(miss) => write!(f, "stale:{miss}"),
+            Self::Unsent => f.write_str("unsent"),
+        }
     }
 }
