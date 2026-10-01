@@ -372,17 +372,15 @@ impl RemoteExecutable {
         }
     }
 
-    fn bridge_command(&self, session_name: &str) -> String {
-        self.bridge_command_with_idle_timeout(session_name, false)
-    }
-
-    fn bridge_command_with_idle_timeout(&self, session_name: &str, idle_timeout: bool) -> String {
-        let command = if idle_timeout {
-            &["remote-client-bridge", "--idle-timeout-v1"][..]
-        } else {
-            &["remote-client-bridge"][..]
-        };
-        let args = Self::session_args(session_name, command);
+    fn bridge_command(&self, session_name: &str, idle_timeout: bool, deflate: bool) -> String {
+        let mut command = vec!["remote-client-bridge"];
+        if idle_timeout {
+            command.push("--idle-timeout-v1");
+        }
+        if deflate {
+            command.push("--deflate-v1");
+        }
+        let args = Self::session_args(session_name, &command);
         match self {
             Self::PosixShellPath(_) => {
                 posix_remote_output_command(&format!("exec {}", self.command(&args)))
@@ -436,6 +434,7 @@ pub(super) struct RemoteHerdr {
     resolved_executable: Option<String>,
     platform: RemotePlatform,
     bridge_idle_timeout: bool,
+    bridge_deflate: bool,
 }
 
 impl RemoteHerdr {
@@ -465,6 +464,7 @@ impl RemoteHerdr {
             resolved_executable: None,
             platform,
             bridge_idle_timeout: false,
+            bridge_deflate: false,
         }
     }
 
@@ -1372,6 +1372,7 @@ pub(super) fn find_installed_remote_herdr(ssh: &RemoteSsh) -> io::Result<RemoteH
         if let Some(status) = remote_client_status(ssh, &candidate)? {
             if status.supports_endpoint_requirement(&candidate.platform, true) {
                 candidate.bridge_idle_timeout = status.remote_bridge_idle_timeout;
+                candidate.bridge_deflate = status.remote_bridge_deflate;
                 return Ok(candidate);
             }
         }
@@ -2151,6 +2152,8 @@ struct RemoteClientStatusJson {
     remote_host_bridge: bool,
     #[serde(default)]
     remote_bridge_idle_timeout: bool,
+    #[serde(default)]
+    remote_bridge_deflate: bool,
 }
 
 impl RemoteClientStatusJson {
@@ -2743,24 +2746,25 @@ impl SshStdioBridge {
         ssh_options: Option<&ManagedSshOptions>,
         noninteractive: bool,
     ) -> io::Result<Self> {
+        let idle_timeout = noninteractive && remote_herdr.bridge_idle_timeout;
+        let deflate = remote_herdr.bridge_deflate;
         Self::start_command(
             target,
-            if noninteractive && remote_herdr.bridge_idle_timeout {
-                remote_herdr
-                    .executable
-                    .bridge_command_with_idle_timeout(&session_name, true)
-            } else {
-                remote_herdr.executable.bridge_command(&session_name)
-            },
+            remote_herdr
+                .executable
+                .bridge_command(&session_name, idle_timeout, deflate),
+            deflate,
             local_socket,
             ssh_options,
             noninteractive,
         )
     }
 
+    /// `deflated` says the remote command writes one raw deflate stream after its output marker.
     pub(super) fn start_command(
         target: String,
         remote_command: String,
+        deflated: bool,
         local_socket: PathBuf,
         ssh_options: Option<&ManagedSshOptions>,
         noninteractive: bool,
@@ -2803,6 +2807,7 @@ impl SshStdioBridge {
                             stream,
                             &target,
                             &remote_command,
+                            deflated,
                             thread_ssh_options.as_ref(),
                             noninteractive,
                             &thread_stop,
@@ -3008,6 +3013,7 @@ fn bridge_connection(
     mut stream: crate::ipc::LocalStream,
     target: &str,
     remote_command: &str,
+    deflated: bool,
     ssh_options: Option<&ManagedSshOptions>,
     noninteractive: bool,
     bridge_stop: &Arc<AtomicBool>,
@@ -3092,6 +3098,7 @@ fn bridge_connection(
         let result = discard_remote_output_preamble(&mut child_stdout).and_then(|()| {
             copy_reader_to_local_stream(
                 &mut child_stdout,
+                deflated.then(BridgeInflater::new).as_mut(),
                 &mut child_to_stream,
                 &download_stop,
                 &download_bridge_stop,
@@ -3250,8 +3257,49 @@ fn terminate_bridge_child(mut child: std::process::Child, message: &'static str)
     Err(io::Error::new(io::ErrorKind::BrokenPipe, message))
 }
 
+/// Decodes the bridge download that `remote-client-bridge --deflate-v1` writes.
+struct BridgeInflater {
+    decompress: flate2::Decompress,
+    output: Vec<u8>,
+}
+
+impl BridgeInflater {
+    fn new() -> Self {
+        Self {
+            decompress: flate2::Decompress::new(false),
+            output: Vec::new(),
+        }
+    }
+
+    /// Everything `input` decodes to. The sender sync-flushes each chunk, so holding back
+    /// decodable bytes until more input arrives would delay a frame by a network round trip.
+    fn inflate(&mut self, mut input: &[u8]) -> io::Result<&[u8]> {
+        self.output.clear();
+        loop {
+            self.output.reserve(64 * 1024);
+            let consumed = self.decompress.total_in();
+            let status = self
+                .decompress
+                .decompress_vec(input, &mut self.output, flate2::FlushDecompress::Sync)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            input = &input[(self.decompress.total_in() - consumed) as usize..];
+            if status == flate2::Status::StreamEnd && !input.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "remote bridge sent data after its deflate stream ended",
+                ));
+            }
+            // Spare output room after a call means the decoder had nothing more to give.
+            if input.is_empty() && self.output.len() < self.output.capacity() {
+                return Ok(&self.output);
+            }
+        }
+    }
+}
+
 fn copy_reader_to_local_stream<R: io::Read>(
     reader: &mut R,
+    mut inflater: Option<&mut BridgeInflater>,
     stream: &mut crate::ipc::LocalStream,
     connection_stop: &AtomicBool,
     bridge_stop: &AtomicBool,
@@ -3266,13 +3314,17 @@ fn copy_reader_to_local_stream<R: io::Read>(
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err),
         };
+        let bytes = match inflater.as_deref_mut() {
+            Some(inflater) => inflater.inflate(&buffer[..read])?,
+            None => &buffer[..read],
+        };
         let mut written = 0;
-        while written < read {
+        while written < bytes.len() {
             if connection_stop.load(Ordering::Acquire) || bridge_stop.load(Ordering::Acquire) {
                 return Ok(total);
             }
-            let chunk_len = (read - written).min(4 * 1024);
-            match stream.write(&buffer[written..written + chunk_len]) {
+            let chunk_len = (bytes.len() - written).min(4 * 1024);
+            match stream.write(&bytes[written..written + chunk_len]) {
                 Ok(0) => thread::sleep(BRIDGE_IO_POLL),
                 Ok(count) => written += count,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -3283,7 +3335,7 @@ fn copy_reader_to_local_stream<R: io::Read>(
             }
         }
         stream.flush()?;
-        total += read as u64;
+        total += bytes.len() as u64;
     }
 }
 
@@ -4131,6 +4183,7 @@ mod tests {
             ],
             remote_host_bridge: false,
             remote_bridge_idle_timeout: false,
+            remote_bridge_deflate: false,
         };
         assert!(status.supports_endpoint_requirement(&linux, true));
         for index in 0..status.endpoint_capabilities.len() {
@@ -4596,7 +4649,7 @@ mod tests {
             ),
             (
                 "direct bridge",
-                executable.bridge_command("agents"),
+                executable.bridge_command("agents", false, false),
                 "$process = Start-Process -FilePath herdr.exe -ArgumentList '--session agents remote-client-bridge' -NoNewWindow -PassThru -ErrorAction Stop; $null = $process.Handle; $process.WaitForExit(); exit $process.ExitCode",
             ),
             (
@@ -4883,8 +4936,56 @@ function Get-Process {
         });
         assert!(remote
             .executable
-            .bridge_command_with_idle_timeout("agents", true)
+            .bridge_command("agents", true, false)
             .ends_with(" --session agents remote-client-bridge --idle-timeout-v1"));
+    }
+
+    #[test]
+    fn remote_bridge_deflate_requires_explicit_support() {
+        let legacy = parse_client_status_json(r#"{"endpoint_protocol_generation":1}"#).unwrap();
+        assert!(!legacy.remote_bridge_deflate);
+        let current = parse_client_status_json(
+            r#"{"endpoint_protocol_generation":1,"remote_bridge_deflate":true}"#,
+        )
+        .unwrap();
+        assert!(current.remote_bridge_deflate);
+        let remote = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        assert!(remote
+            .executable
+            .bridge_command("agents", true, true)
+            .ends_with(" remote-client-bridge --idle-timeout-v1 --deflate-v1"));
+    }
+
+    #[test]
+    fn bridge_inflater_returns_each_flushed_chunk_whole() {
+        use std::io::Write as _;
+
+        // The large chunk decodes to far more than one output reservation from a few input bytes.
+        let chunks = [
+            b"welcome".to_vec(),
+            vec![b'x'; 1024 * 1024],
+            (0..=255).cycle().take(70_000).collect::<Vec<u8>>(),
+            b"pong".to_vec(),
+        ];
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut inflater = BridgeInflater::new();
+        // The reader sees the wire bytes in arbitrary splits.
+        for split in [usize::MAX, 7] {
+            for chunk in &chunks {
+                encoder.write_all(chunk).unwrap();
+                encoder.flush().unwrap();
+                let wire = std::mem::take(encoder.get_mut());
+                let mut decoded = Vec::new();
+                for piece in wire.chunks(split) {
+                    decoded.extend_from_slice(inflater.inflate(piece).unwrap());
+                }
+                assert_eq!(&decoded, chunk);
+            }
+        }
     }
 
     #[test]
@@ -4896,7 +4997,7 @@ function Get-Process {
         assert_eq!(
             remote_herdr
                 .executable
-                .bridge_command(crate::session::DEFAULT_SESSION_NAME),
+                .bridge_command(crate::session::DEFAULT_SESSION_NAME, false, false),
             "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" remote-client-bridge"
         );
         assert_eq!(
@@ -4917,7 +5018,7 @@ function Get-Process {
         assert_eq!(
             remote_herdr
                 .executable
-                .bridge_command(crate::session::DEFAULT_SESSION_NAME),
+                .bridge_command(crate::session::DEFAULT_SESSION_NAME, false, false),
             "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec /usr/bin/herdr remote-client-bridge"
         );
     }
@@ -4935,7 +5036,7 @@ function Get-Process {
         assert_eq!(
             remote_herdr
                 .executable
-                .bridge_command(crate::session::DEFAULT_SESSION_NAME),
+                .bridge_command(crate::session::DEFAULT_SESSION_NAME, false, false),
             "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr bin/herdr' remote-client-bridge"
         );
     }
@@ -4953,7 +5054,7 @@ function Get-Process {
         assert_eq!(
             remote_herdr
                 .executable
-                .bridge_command(crate::session::DEFAULT_SESSION_NAME),
+                .bridge_command(crate::session::DEFAULT_SESSION_NAME, false, false),
             "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec /opt/homebrew/bin/herdr remote-client-bridge"
         );
         assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
@@ -5050,7 +5151,7 @@ function Get-Process {
         assert_eq!(
             remote_herdr
                 .executable
-                .bridge_command(crate::session::DEFAULT_SESSION_NAME),
+                .bridge_command(crate::session::DEFAULT_SESSION_NAME, false, false),
             "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
         );
     }

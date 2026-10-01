@@ -19,6 +19,7 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 pub(crate) fn forward_remote_bridge_stdio(
     stream: crate::ipc::LocalStream,
     _idle_timeout: bool,
+    _deflate: bool,
 ) -> std::io::Result<()> {
     use interprocess::TryClone as _;
 

@@ -321,6 +321,10 @@ pub(crate) struct RemoteSshConfigPaths {
 pub(crate) const REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED: bool =
     cfg!(any(target_os = "linux", target_os = "macos"));
 
+/// Whether `remote-client-bridge --deflate-v1` compresses its download. herdr compresses the
+/// bridge itself because some SSH servers, such as Tailscale SSH, refuse `ssh -C`.
+pub(crate) const REMOTE_BRIDGE_DEFLATE_SUPPORTED: bool = cfg!(unix);
+
 #[cfg(unix)]
 mod remote_bridge;
 #[cfg(all(test, unix))]

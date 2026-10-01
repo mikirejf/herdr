@@ -79,6 +79,7 @@ impl SavedSshApiBridge {
         let bridge = SshStdioBridge::start_command(
             target.to_owned(),
             command,
+            false,
             path.clone(),
             ssh.options(),
             true,

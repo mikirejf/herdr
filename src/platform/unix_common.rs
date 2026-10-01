@@ -147,16 +147,21 @@ pub(crate) fn wait_client_stream_readable(stream: &crate::ipc::LocalStream) -> s
 pub(crate) fn forward_remote_bridge_stdio(
     stream: crate::ipc::LocalStream,
     idle_timeout: bool,
+    deflate: bool,
 ) -> std::io::Result<()> {
     forward_remote_bridge_stdio_with_timeout(
         stream,
         idle_timeout.then_some(super::remote_bridge::IDLE_TIMEOUT),
+        deflate,
     )
 }
 
+/// With `deflate`, stdout carries one raw deflate stream that is sync-flushed after every
+/// socket read, so each server message decodes as soon as its bytes arrive.
 pub(super) fn forward_remote_bridge_stdio_with_timeout(
     stream: crate::ipc::LocalStream,
     idle_timeout: Option<std::time::Duration>,
+    deflate: bool,
 ) -> std::io::Result<()> {
     use super::remote_bridge::{Activity, TrackedIo};
     use interprocess::TryClone as _;
@@ -174,7 +179,13 @@ pub(super) fn forward_remote_bridge_stdio_with_timeout(
         let crate::ipc::LocalStream::UdSocket(stream) = stdin_to_socket;
         let _ = stream.inner().shutdown(std::net::Shutdown::Write);
     });
-    copy_flush(&mut socket_to_stdout, &mut stdout)
+    if deflate {
+        let mut stdout = flate2::write::DeflateEncoder::new(stdout, flate2::Compression::default());
+        copy_flush(&mut socket_to_stdout, &mut stdout)?;
+        std::io::Write::flush(&mut stdout.finish()?)
+    } else {
+        copy_flush(&mut socket_to_stdout, &mut stdout)
+    }
 }
 
 fn copy_flush<R: std::io::Read, W: std::io::Write>(

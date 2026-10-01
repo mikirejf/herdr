@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_millis(300);
+const DEFLATE_READY: &[u8] = b"deflate-bridge-ready\n";
 
 #[test]
 fn bridge_child() {
@@ -14,7 +15,14 @@ fn bridge_child() {
     };
     let stream = crate::ipc::connect_local_stream(&PathBuf::from(path)).unwrap();
     let timeout = (std::env::var_os("HERDR_BRIDGE_TEST_LEGACY").is_none()).then_some(TIMEOUT);
-    super::unix_common::forward_remote_bridge_stdio_with_timeout(stream, timeout).unwrap();
+    let deflate = std::env::var_os("HERDR_BRIDGE_TEST_DEFLATE").is_some();
+    if deflate {
+        // libtest writes its own banner to stdout first.
+        let mut stdout = std::io::stdout();
+        stdout.write_all(DEFLATE_READY).unwrap();
+        stdout.flush().unwrap();
+    }
+    super::unix_common::forward_remote_bridge_stdio_with_timeout(stream, timeout, deflate).unwrap();
 }
 
 struct Bridge {
@@ -25,6 +33,10 @@ struct Bridge {
 
 impl Bridge {
     fn start(legacy: bool) -> Self {
+        Self::start_with(legacy, false)
+    }
+
+    fn start_with(legacy: bool, deflate: bool) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "hbl-{}-{}.sock",
@@ -42,11 +54,15 @@ impl Bridge {
             ])
             .env("HERDR_BRIDGE_TEST_SOCKET", &path)
             .env_remove("HERDR_BRIDGE_TEST_LEGACY")
+            .env_remove("HERDR_BRIDGE_TEST_DEFLATE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         if legacy {
             command.env("HERDR_BRIDGE_TEST_LEGACY", "1");
+        }
+        if deflate {
+            command.env("HERDR_BRIDGE_TEST_DEFLATE", "1");
         }
         let mut child = command.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -165,4 +181,46 @@ fn legacy_bridge_has_no_idle_deadline() {
     std::thread::sleep(TIMEOUT * 2);
     assert!(bridge.child.try_wait().unwrap().is_none());
     assert!(bridge.finish().contains("final-output-after-stdin-eof"));
+}
+
+#[test]
+fn deflate_bridge_delivers_each_socket_write_without_more_input() {
+    let mut bridge = Bridge::start_with(true, true);
+    let mut stdout = bridge.child.stdout.take().unwrap();
+    let (wire_tx, wire_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0; 16 * 1024];
+        let mut preamble = Some(Vec::new());
+        while let Ok(read @ 1..) = stdout.read(&mut buffer) {
+            let mut wire = buffer[..read].to_vec();
+            if let Some(seen) = preamble.as_mut() {
+                seen.extend_from_slice(&wire);
+                let Some(start) = seen
+                    .windows(DEFLATE_READY.len())
+                    .position(|window| window == DEFLATE_READY)
+                else {
+                    continue;
+                };
+                wire = seen.split_off(start + DEFLATE_READY.len());
+                preamble = None;
+            }
+            if wire_tx.send(wire).is_err() {
+                return;
+            }
+        }
+    });
+    let mut decoder = flate2::write::DeflateDecoder::new(Vec::new());
+    let large = (0..=255).cycle().take(200_000).collect::<Vec<u8>>();
+    for message in [b"welcome".as_slice(), &large, b"pong"] {
+        bridge.stream.write_all(message).unwrap();
+        while decoder.get_ref().len() < message.len() {
+            let wire = wire_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("bridge held back a written message");
+            decoder.write_all(&wire).unwrap();
+            decoder.flush().unwrap();
+        }
+        assert_eq!(decoder.get_ref(), message);
+        decoder.get_mut().clear();
+    }
 }

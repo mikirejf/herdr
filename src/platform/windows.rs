@@ -70,6 +70,7 @@ pub(crate) fn wait_client_stream_readable(
 pub(crate) fn forward_remote_bridge_stdio(
     stream: crate::ipc::LocalStream,
     _idle_timeout: bool,
+    _deflate: bool,
 ) -> std::io::Result<()> {
     use interprocess::TryClone as _;
     use std::sync::atomic::{AtomicBool, Ordering};
