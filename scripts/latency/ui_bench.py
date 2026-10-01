@@ -29,7 +29,9 @@ Clicks are SGR mouse events. Scenarios run only when configured:
 "settled" is the last pty output before 0.8 s of quiet, both in ms from the
 click. With --trace FILE (delay_proxy.py output, only useful when the client's
 traffic goes through the proxy) the wire bytes up/down and the number of
-up->down turnarounds in that window are added. Timeouts are reported, not
+up->down turnarounds in that window are added, and "wire ms": when the last
+downstream chunk at or before "visible" passed the proxy. "visible" minus "wire
+ms" is time spent after the bytes left the network. Timeouts are reported, not
 averaged in, and make the exit status 3. A missing sidebar label or a client
 that exits prints the screen and exits 1.
 """
@@ -40,13 +42,14 @@ import json
 import math
 import os
 import pty
-import select
+import queue
 import shlex
 import signal
 import statistics
 import struct
 import sys
 import termios
+import threading
 import time
 
 import pyte
@@ -93,6 +96,23 @@ class Client:
                 os.write(2, f"ui_bench: cannot run {argv[0]}: {err}\n".encode())
                 os._exit(127)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        # pyte needs ~100 ms for a full colored 300x80 frame. A reader that waited for it would
+        # stamp the next chunks late and block the client's writes, so a thread stamps every
+        # chunk as it arrives. The pty hands over ~1 KB per read and the thread needs the GIL
+        # after each one, so pyte must give it up far sooner than the default 5 ms.
+        sys.setswitchinterval(0.0001)
+        self.chunks = queue.Queue()
+        threading.Thread(target=self.read_pty, daemon=True).start()
+
+    def read_pty(self):
+        while True:
+            try:
+                data = os.read(self.fd, 1 << 20)
+            except OSError:
+                data = b""
+            self.chunks.put((time.monotonic(), data))
+            if not data:
+                return
 
     def close(self):
         # The client ignores SIGTERM while attached, so escalate.
@@ -110,14 +130,11 @@ class Client:
                 time.sleep(0.1)
 
     def pump(self, timeout):
-        ready, _, _ = select.select([self.fd], [], [], timeout)
-        if not ready:
-            return 0
+        """Feed one chunk to the screen. `last_read` is when that chunk arrived."""
         try:
-            data = os.read(self.fd, 1 << 20)
-        except OSError:
-            data = b""
-        self.last_read = time.monotonic()
+            self.last_read, data = self.chunks.get(timeout=timeout)
+        except queue.Empty:
+            return 0
         if not data:
             raise ClientExited
         self.stream.feed(data)
@@ -128,7 +145,7 @@ class Client:
         start = last = time.monotonic()
         while time.monotonic() - start < maxt:
             if self.pump(0.05):
-                last = time.monotonic()
+                last = self.last_read
             elif time.monotonic() - last > quiet:
                 return
 
@@ -163,10 +180,12 @@ class Client:
     def click(self, x, y):
         os.write(self.fd, f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m".encode())
 
-    def wire(self, t0, t1):
-        """Wire bytes and up->down turnarounds through the proxy in [t0, t1]."""
+    def wire(self, t0, t1, hit):
+        """Wire bytes and up->down turnarounds through the proxy in [t0, t1], and the stamp of
+        the last downstream chunk at or before `hit`."""
         up = down = turns = 0
         last = None
+        last_down = t0
         with open(self.trace_path) as f:
             for line in f:
                 stamp, direction, size = line.split()
@@ -176,12 +195,20 @@ class Client:
                     up += int(size)
                 else:
                     down += int(size)
+                    if float(stamp) <= hit:
+                        last_down = float(stamp)
                     if last == "u":
                         turns += 1
                 last = direction
-        return up, down, turns
+        return up, down, turns, last_down
 
-    def measure(self, label, done, action, timeout):
+    def idle(self, seconds):
+        end = time.monotonic() + seconds
+        while (left := end - time.monotonic()) > 0:
+            self.pump(min(left, 0.1))
+
+    def measure(self, label, done, action, timeout, idle=0):
+        self.idle(idle)
         self.settle(0.5)
         before = self.snapshot()
         b0 = self.nbytes
@@ -196,14 +223,16 @@ class Client:
             elif hit is not None and time.monotonic() - last > QUIET:
                 break
         sample = {"timeout": hit is None, "visible": None, "settled": None,
-                  "pty": self.nbytes - b0, "up": None, "down": None, "turns": None}
+                  "pty": self.nbytes - b0, "up": None, "down": None, "turns": None,
+                  "wire": None}
         if hit is None:
             print(f"  {label}: TIMEOUT after {timeout:g} s", file=sys.stderr, flush=True)
             return sample
         sample["visible"] = (hit - t0) * 1000
         sample["settled"] = (last - t0) * 1000
         if self.trace_path:
-            sample["up"], sample["down"], sample["turns"] = self.wire(t0, last)
+            sample["up"], sample["down"], sample["turns"], last_down = self.wire(t0, last, hit)
+            sample["wire"] = (last_down - t0) * 1000
         print(f"  {label}: visible {sample['visible']:.0f} ms", file=sys.stderr, flush=True)
         return sample
 
@@ -221,7 +250,7 @@ def summarize(samples):
     out = {"n": len(samples), "timeouts": len(samples) - len(ok),
            "visible": stats(s["visible"] for s in ok),
            "settled": stats(s["settled"] for s in ok)}
-    for key in ("pty", "up", "down", "turns"):
+    for key in ("pty", "up", "down", "turns", "wire"):
         values = [s[key] for s in ok if s[key] is not None]
         out[key] = statistics.median(values) if values else None
     return out
@@ -232,8 +261,8 @@ def print_table(results, traced):
     head = f"{'scenario':<24}{'ok/n':>6} | {'visible ms':^27} | {'settled ms':^27} | {'pty B':>8}"
     sub = f"{'':<24}{'':>6} | {'min':>6}{'med':>7}{'p90':>7}{'max':>7} | {'min':>6}{'med':>7}{'p90':>7}{'max':>7} | {'(median)':>8}"
     if traced:
-        head += f" | {'wire B (median)':^19} | {'turns':>5}"
-        sub += f" | {'up':>9}{'down':>10} | {'':>5}"
+        head += f" | {'wire B (median)':^19} | {'turns':>5} | {'wire ms':>7}"
+        sub += f" | {'up':>9}{'down':>10} | {'':>5} | {'(median)':>7}"
     print(head)
     print(sub)
     for name, samples in results.items():
@@ -245,7 +274,7 @@ def print_table(results, traced):
             row += " " + "".join(cells) + " |"
         row += " " + num(s["pty"], 8)
         if traced:
-            row += f" | {num(s['up'], 9)}{num(s['down'], 10)} | {num(s['turns'], 5)}"
+            row += f" | {num(s['up'], 9)}{num(s['down'], 10)} | {num(s['turns'], 5)} | {num(s['wire'], 7)}"
         if s["timeouts"]:
             row += f"   TIMEOUT x{s['timeouts']}"
         print(row)
@@ -256,7 +285,8 @@ def run_scenarios(client, args):
     timeout = args.timeout
 
     def record(name, done, action):
-        results.setdefault(name, []).append(client.measure(name, done, action, timeout))
+        results.setdefault(name, []).append(
+            client.measure(name, done, action, timeout, args.idle))
 
     if args.remote_ws:
         remote_xy = client.find(args.remote_ws)
@@ -304,6 +334,9 @@ def parse_args():
     p.add_argument("--pane-cols", metavar="A,B", help="two screen columns (1-based) to click alternately")
     p.add_argument("-n", type=int, default=5, help="measured repetitions per scenario (default 5)")
     p.add_argument("--timeout", type=float, default=30, metavar="SEC", help="per action (default 30)")
+    p.add_argument("--idle", type=float, default=0, metavar="SEC",
+                   help="wait this long before each measured action, so the link goes idle "
+                        "the way it does between real clicks (default 0)")
     p.add_argument("--cols", type=int, default=200)
     p.add_argument("--rows", type=int, default=50)
     p.add_argument("--wait-text", metavar="TEXT", help="before starting, wait up to 60 s for TEXT on screen")
