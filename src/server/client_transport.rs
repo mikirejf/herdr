@@ -142,6 +142,27 @@ impl ClientWriter {
     }
 
     #[cfg(all(test, unix))]
+    pub(crate) fn test_flow_paused() -> Self {
+        let queue = ClientWriterQueue::with_flow(true);
+        Self {
+            control: ClientControlWriter::queue(queue.clone()),
+            render: ClientRenderWriter::queue(queue),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_acknowledge(&self, received: u64) -> bool {
+        self.render.queue.acknowledge(received)
+    }
+
+    /// `(sent, acked)` for a connection with a flow window.
+    #[cfg(test)]
+    pub(crate) fn test_flow_counts(&self) -> Option<(u64, u64)> {
+        let state = self.render.queue.lock_state();
+        state.flow.as_ref().map(|flow| (flow.sent, flow.acked))
+    }
+
+    #[cfg(all(test, unix))]
     pub(crate) fn test_drain(&self) -> Vec<Vec<u8>> {
         let mut state = self.render.queue.lock_state();
         let mut frames = state.control.drain(..).collect::<Vec<_>>();
@@ -277,6 +298,34 @@ struct ClientWriterQueueState {
     render: Option<Vec<u8>>,
     senders: usize,
     writer_alive: bool,
+    flow: Option<FlowWindow>,
+}
+
+/// Framed bytes the server may have written past the client's last surface ack. Sized well above
+/// one typical surface frame and the client's 16 KiB ack interval, so an acking client never
+/// stalls on its own unacked tail.
+const SURFACE_ACK_WINDOW: u64 = 128 * 1024;
+
+/// Byte accounting for a client that acknowledges what it has read. `sent` counts framed bytes
+/// enqueued after the welcome minus bytes discarded before the writer claimed them, so it equals
+/// the bytes the client will read.
+#[derive(Debug, Default)]
+struct FlowWindow {
+    sent: u64,
+    acked: u64,
+    /// A render was refused or a drain went unreported while the window was closed; the ack that
+    /// reopens it must wake the render path.
+    refused: bool,
+}
+
+impl FlowWindow {
+    fn is_closed(&self) -> bool {
+        self.sent.saturating_sub(self.acked) >= SURFACE_ACK_WINDOW
+    }
+}
+
+fn byte_len(data: &[u8]) -> u64 {
+    data.len() as u64
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -286,14 +335,84 @@ enum ClientWriteItem {
 }
 
 impl ClientWriterQueue {
+    #[cfg(test)]
     fn new() -> Arc<Self> {
+        Self::with_flow(false)
+    }
+
+    fn with_flow(surface_ack: bool) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(ClientWriterQueueState {
                 writer_alive: true,
+                flow: surface_ack.then(FlowWindow::default),
                 ..ClientWriterQueueState::default()
             }),
             ready: Condvar::new(),
         })
+    }
+
+    /// Records the client's received-byte total. Returns true when this ack reopens a window that
+    /// held back a render, so the caller wakes the deferred render once.
+    fn acknowledge(&self, received: u64) -> bool {
+        let mut state = self.lock_state();
+        let Some(flow) = state.flow.as_mut() else {
+            return false;
+        };
+        // The client cannot have read more than was written, and acks arrive in order; anything
+        // else is a stale or invalid report that must not open the window.
+        if received > flow.sent || received <= flow.acked {
+            return false;
+        }
+        flow.acked = received;
+        if flow.refused && !flow.is_closed() {
+            flow.refused = false;
+            return true;
+        }
+        false
+    }
+
+    /// Whether the writer may report a drained render slot now. While the window is closed the
+    /// report waits for the ack that reopens it, so a drain does not trigger a render that would
+    /// be refused at once.
+    fn take_drain_report(&self) -> bool {
+        let mut state = self.lock_state();
+        match state.flow.as_mut() {
+            Some(flow) if flow.is_closed() => {
+                flow.refused = true;
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// Returns true when the flow window refuses render work, marking the refusal.
+    fn refuse_render(state: &mut ClientWriterQueueState) -> bool {
+        match state.flow.as_mut() {
+            Some(flow) if flow.is_closed() => {
+                flow.refused = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn count_sent(state: &mut ClientWriterQueueState, bytes: u64) {
+        if let Some(flow) = state.flow.as_mut() {
+            flow.sent += bytes;
+        }
+    }
+
+    /// Drops unclaimed render work and takes its bytes back out of the flow window.
+    fn drop_pending_render(state: &mut ClientWriterQueueState) {
+        let discarded = state.render.take().as_deref().map_or(0, byte_len)
+            + state
+                .ordered
+                .drain(..)
+                .map(|data| byte_len(&data))
+                .sum::<u64>();
+        if let Some(flow) = state.flow.as_mut() {
+            flow.sent -= discarded;
+        }
     }
 
     fn add_sender(&self) {
@@ -312,6 +431,7 @@ impl ClientWriterQueue {
         if !state.writer_alive {
             return Err(SendError(data));
         }
+        Self::count_sent(&mut state, byte_len(&data));
         state.control.push_back(data);
         self.ready.notify_one();
         Ok(())
@@ -322,9 +442,10 @@ impl ClientWriterQueue {
         if !state.writer_alive {
             return Err(TrySendError::Disconnected(data));
         }
-        if state.render.is_some() {
+        if Self::refuse_render(&mut state) || state.render.is_some() {
             return Err(TrySendError::Full(data));
         }
+        Self::count_sent(&mut state, byte_len(&data));
         state.render = Some(data);
         self.ready.notify_one();
         Ok(())
@@ -332,8 +453,7 @@ impl ClientWriterQueue {
 
     fn discard_pending_render(&self) {
         let mut state = self.lock_state();
-        state.render = None;
-        state.ordered.clear();
+        Self::drop_pending_render(&mut state);
         self.ready.notify_all();
     }
 
@@ -342,12 +462,13 @@ impl ClientWriterQueue {
         if !state.writer_alive {
             return Err(TrySendError::Disconnected(data));
         }
-        if !state.ordered.is_empty() {
+        if Self::refuse_render(&mut state) || !state.ordered.is_empty() {
             return Err(TrySendError::Full(data));
         }
         if let Some(older) = state.render.take() {
             state.ordered.push_back(older);
         }
+        Self::count_sent(&mut state, byte_len(&data));
         state.ordered.push_back(data);
         self.ready.notify_one();
         Ok(())
@@ -379,8 +500,7 @@ impl ClientWriterQueue {
     fn close_writer(&self) {
         let mut state = self.lock_state();
         state.writer_alive = false;
-        state.render = None;
-        state.ordered.clear();
+        Self::drop_pending_render(&mut state);
         self.ready.notify_all();
     }
 
@@ -715,6 +835,7 @@ pub(crate) fn handle_client_handshake(
         }
     };
 
+    let mut surface_ack = false;
     let (
         client_cols,
         client_rows,
@@ -782,6 +903,7 @@ pub(crate) fn handle_client_handshake(
                 write_endpoint_rejection(&mut stream, code, reason);
                 return Ok(());
             }
+            surface_ack = hello.surface_ack;
             (
                 hello.surface_size.cols,
                 hello.surface_size.rows,
@@ -866,7 +988,7 @@ pub(crate) fn handle_client_handshake(
     )?;
 
     // Create separate channels for reliable control messages and droppable renders.
-    let writer_queue = ClientWriterQueue::new();
+    let writer_queue = ClientWriterQueue::with_flow(surface_ack);
     let writer = ClientWriter {
         control: ClientControlWriter::queue(writer_queue.clone()),
         render: ClientRenderWriter::queue(writer_queue.clone()),
@@ -971,8 +1093,10 @@ fn client_writer_loop(
         let written = match item {
             ClientWriteItem::Control(data) => write_framed_bytes(&mut stream, &data),
             ClientWriteItem::Render(data) => {
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientWriterDrained { client_id });
+                if writer_queue.take_drain_report() {
+                    let _ = server_event_tx
+                        .blocking_send(ServerEvent::ClientWriterDrained { client_id });
+                }
                 write_framed_bytes(&mut stream, &data)
             }
         };
@@ -1367,6 +1491,25 @@ fn client_read_loop_with_endpoint_controls(
                 ServerEvent::ClientShellSurfaceForeground { client_id }
             }
             ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::SURFACE_ACK_KIND =>
+            {
+                let ack = match serde_json::from_str::<crate::protocol::endpoint::EndpointSurfaceAck>(
+                    &data,
+                ) {
+                    Ok(ack) => ack,
+                    Err(error) => {
+                        debug!(client_id, %error, "ignoring invalid surface ack");
+                        continue;
+                    }
+                };
+                let reopened = endpoint_control_writer
+                    .is_some_and(|writer| writer.queue.acknowledge(ack.received));
+                if !reopened {
+                    continue;
+                }
+                ServerEvent::ClientWriterDrained { client_id }
+            }
+            ClientMessage::EndpointControl { kind, data }
                 if kind == crate::protocol::tab_screens::REQUEST_KIND =>
             {
                 match crate::protocol::tab_screens::decode_request(&data) {
@@ -1492,6 +1635,14 @@ mod tests {
     }
 
     fn endpoint_hello(surface_cols: u16, surface_rows: u16) -> ClientMessage {
+        endpoint_hello_with_ack(surface_cols, surface_rows, false)
+    }
+
+    fn endpoint_hello_with_ack(
+        surface_cols: u16,
+        surface_rows: u16,
+        surface_ack: bool,
+    ) -> ClientMessage {
         let hello = EndpointClientHello {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             cell_width_px: 8,
@@ -1509,6 +1660,7 @@ mod tests {
             surface_delta: false,
             surface_scroll: false,
             surface_tab_baselines: false,
+            surface_ack,
             snapshot_codecs: vec![crate::protocol::endpoint::SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
@@ -2452,6 +2604,285 @@ mod tests {
             pane_input_event_limit(&[oversized_scroll]),
             InputEventLimit::TooManyEvents
         );
+    }
+
+    const WINDOW: usize = SURFACE_ACK_WINDOW as usize;
+
+    fn flow_test_writer() -> (ClientWriter, Arc<ClientWriterQueue>) {
+        let queue = ClientWriterQueue::with_flow(true);
+        (
+            ClientWriter {
+                control: ClientControlWriter::queue(queue.clone()),
+                render: ClientRenderWriter::queue(queue.clone()),
+            },
+            queue,
+        )
+    }
+
+    fn claim_render(queue: &ClientWriterQueue) {
+        assert!(matches!(queue.recv(), Some(ClientWriteItem::Render(_))));
+    }
+
+    #[test]
+    fn flow_window_refuses_render_once_full_but_never_control() {
+        let (writer, queue) = flow_test_writer();
+        writer.render.try_send(vec![0; WINDOW - 1]).unwrap();
+        claim_render(&queue);
+        // Below the window, a frame goes even though it crosses the limit.
+        writer.render.try_send(vec![0; 10]).unwrap();
+        claim_render(&queue);
+        assert!(matches!(
+            writer.render.try_send(vec![0; 1]),
+            Err(TrySendError::Full(_))
+        ));
+        assert!(matches!(
+            writer.render.send_ordered(vec![0; 1]),
+            Err(TrySendError::Full(_))
+        ));
+        writer.control.send(vec![0; 64]).unwrap();
+        assert_eq!(
+            writer.test_flow_counts(),
+            Some(((WINDOW - 1 + 10 + 64) as u64, 0))
+        );
+    }
+
+    #[test]
+    fn flow_window_lets_one_oversized_frame_through() {
+        let (writer, queue) = flow_test_writer();
+        writer.render.try_send(vec![0; 4 * WINDOW]).unwrap();
+        claim_render(&queue);
+        assert!(matches!(
+            writer.render.try_send(vec![0; 1]),
+            Err(TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn ack_reopens_the_window_and_wakes_the_render_once() {
+        let (writer, queue) = flow_test_writer();
+        let sent = 2 * SURFACE_ACK_WINDOW;
+        writer.render.try_send(vec![0; 2 * WINDOW]).unwrap();
+        claim_render(&queue);
+        assert!(matches!(
+            writer.render.try_send(vec![0; 1]),
+            Err(TrySendError::Full(_))
+        ));
+
+        assert!(!queue.acknowledge(sent + 1), "an ack past sent is invalid");
+        assert_eq!(writer.test_flow_counts(), Some((sent, 0)));
+        assert!(
+            !queue.acknowledge(SURFACE_ACK_WINDOW / 2),
+            "window stays closed"
+        );
+        assert!(
+            !queue.acknowledge(SURFACE_ACK_WINDOW / 4),
+            "acks never move back"
+        );
+        assert_eq!(
+            writer.test_flow_counts(),
+            Some((sent, SURFACE_ACK_WINDOW / 2))
+        );
+        assert!(
+            queue.acknowledge(SURFACE_ACK_WINDOW + 1),
+            "reopening ack wakes"
+        );
+        assert!(!queue.acknowledge(sent), "the wake is reported once");
+        writer.render.try_send(vec![0; 1]).unwrap();
+    }
+
+    #[test]
+    fn ack_without_a_refusal_does_not_wake_the_render() {
+        let (writer, queue) = flow_test_writer();
+        writer.render.try_send(vec![0; 100]).unwrap();
+        claim_render(&queue);
+        assert!(!queue.acknowledge(100));
+    }
+
+    #[test]
+    fn closed_window_holds_the_drain_report_until_the_reopening_ack() {
+        let (writer, queue) = flow_test_writer();
+        writer.render.try_send(vec![0; WINDOW / 2]).unwrap();
+        claim_render(&queue);
+        assert!(queue.take_drain_report(), "open window reports the drain");
+        writer.render.try_send(vec![0; WINDOW]).unwrap();
+        claim_render(&queue);
+        assert!(!queue.take_drain_report(), "closed window holds the drain");
+        assert!(queue.acknowledge(SURFACE_ACK_WINDOW));
+
+        let (_writer, unlimited) = test_queue_writer();
+        assert!(unlimited.take_drain_report());
+    }
+
+    #[test]
+    fn discarded_render_work_leaves_the_flow_window() {
+        let (writer, queue) = flow_test_writer();
+        writer.render.try_send(vec![0; 30]).unwrap();
+        claim_render(&queue);
+        writer.render.try_send(vec![0; 100]).unwrap();
+        writer.render.send_ordered(vec![0; 50]).unwrap();
+        assert_eq!(writer.test_flow_counts(), Some((180, 0)));
+        writer.discard_pending_render();
+        assert_eq!(
+            writer.test_flow_counts(),
+            Some((30, 0)),
+            "claimed bytes stay counted; unclaimed bytes never reach the client"
+        );
+    }
+
+    #[test]
+    fn connection_without_surface_ack_has_no_flow_limit() {
+        let (writer, queue) = test_queue_writer();
+        for _ in 0..4 {
+            writer.render.try_send(vec![0; WINDOW]).unwrap();
+            claim_render(&queue);
+        }
+        assert!(!queue.acknowledge(1));
+        assert_eq!(writer.test_flow_counts(), None);
+    }
+
+    struct CountingReader<'a> {
+        stream: &'a mut LocalStream,
+        received: u64,
+    }
+
+    impl io::Read for CountingReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.stream.read(buffer)?;
+            self.received += count as u64;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn surface_ack_handshake_bounds_renders_until_the_client_acks() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("surface-ack-flow");
+        client_stream
+            .set_recv_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 44, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(&mut client_stream, &endpoint_hello_with_ack(80, 29, true))
+            .unwrap();
+        let welcome = endpoint_welcome(
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome"),
+        );
+        assert!(welcome
+            .capabilities
+            .iter()
+            .any(|capability| capability == crate::protocol::endpoint::SURFACE_ACK_CAPABILITY));
+        let writer = match recv_server_event(&mut server_event_rx, "shell connected") {
+            ServerEvent::ClientShellConnected { writer, .. } => writer,
+            other => panic!("expected ClientShellConnected, got {other:?}"),
+        };
+
+        let render = frame_server_message(&ServerMessage::WindowTitle {
+            title: Some("x".repeat(16 * 1024)),
+        });
+        let mut client = CountingReader {
+            stream: &mut client_stream,
+            received: 0,
+        };
+        let mut accepted = 0u64;
+        let mut renders = 0;
+        // The client reads but does not ack; renders stop once the window fills.
+        loop {
+            match writer.render.try_send(render.clone()) {
+                Ok(()) => {
+                    accepted += render.len() as u64;
+                    renders += 1;
+                }
+                Err(TrySendError::Full(_)) => {
+                    let (sent, acked) = writer.test_flow_counts().unwrap();
+                    if sent - acked >= SURFACE_ACK_WINDOW {
+                        break;
+                    }
+                    let _: ServerMessage =
+                        protocol::read_message(&mut client, MAX_GRAPHICS_FRAME_SIZE).unwrap();
+                }
+                Err(TrySendError::Disconnected(_)) => panic!("writer disconnected"),
+            }
+        }
+        assert!(accepted >= SURFACE_ACK_WINDOW);
+        assert!(accepted < SURFACE_ACK_WINDOW + render.len() as u64);
+        while client.received < accepted {
+            let _: ServerMessage =
+                protocol::read_message(&mut client, MAX_GRAPHICS_FRAME_SIZE).unwrap();
+        }
+        assert_eq!(client.received, accepted);
+        assert!(
+            matches!(
+                writer.render.try_send(render.clone()),
+                Err(TrySendError::Full(_))
+            ),
+            "with every frame delivered, only the window can refuse"
+        );
+        // The render that closed the window was claimed while it was closed, so it reports no
+        // drain; earlier renders may or may not, depending on when the writer checked.
+        let mut drains = 0;
+        while let Ok(event) = server_event_rx.try_recv() {
+            assert!(matches!(
+                event,
+                ServerEvent::ClientWriterDrained { client_id: 44 }
+            ));
+            drains += 1;
+        }
+        assert!(drains < renders, "no drain is reported while closed");
+
+        writer
+            .control
+            .send(frame_server_message(&ServerMessage::ReloadSoundConfig))
+            .unwrap();
+        assert_eq!(
+            protocol::read_message::<_, ServerMessage>(&mut client, MAX_FRAME_SIZE).unwrap(),
+            ServerMessage::ReloadSoundConfig
+        );
+        let received = client.received;
+        assert_eq!(writer.test_flow_counts(), Some((received, 0)));
+
+        protocol::write_message(
+            &mut client_stream,
+            &crate::protocol::endpoint::surface_ack_message(received),
+        )
+        .unwrap();
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "reopening ack"),
+            ServerEvent::ClientWriterDrained { client_id: 44 }
+        ));
+        assert_eq!(writer.test_flow_counts(), Some((received, received)));
+        writer.render.try_send(render).unwrap();
+
+        drop(writer);
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn plain_endpoint_hello_gets_no_flow_window() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("surface-ack-off");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 45, &server_event_tx, &handshake_quit)
+        });
+        protocol::write_message(&mut client_stream, &endpoint_hello(80, 29)).unwrap();
+        let _ =
+            endpoint_welcome(protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).unwrap());
+        match recv_server_event(&mut server_event_rx, "shell connected") {
+            ServerEvent::ClientShellConnected { writer, .. } => {
+                assert_eq!(writer.test_flow_counts(), None);
+            }
+            other => panic!("expected ClientShellConnected, got {other:?}"),
+        }
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle.join().unwrap().unwrap();
     }
 
     #[test]

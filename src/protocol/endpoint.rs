@@ -49,6 +49,23 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+/// The server limits how many framed bytes it has written past the client's last
+/// `SURFACE_ACK_KIND`, for connections whose hello set `surface_ack`.
+pub const SURFACE_ACK_CAPABILITY: &str = "surface_ack";
+/// Client-to-server: the total framed bytes the client has read since the welcome.
+pub const SURFACE_ACK_KIND: &str = "endpoint.surface.ack.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointSurfaceAck {
+    pub received: u64,
+}
+
+pub fn surface_ack_message(received: u64) -> super::ClientMessage {
+    super::ClientMessage::EndpointControl {
+        kind: SURFACE_ACK_KIND.into(),
+        data: format!("{{\"received\":{received}}}"),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -85,6 +102,9 @@ pub struct EndpointClientHello {
     /// Accept per-tab surface baselines on this connection.
     #[serde(default)]
     pub surface_tab_baselines: bool,
+    /// Acknowledge received bytes so the server can bound bytes in flight on this connection.
+    #[serde(default)]
+    pub surface_ack: bool,
     #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
@@ -199,6 +219,7 @@ impl EndpointServerWelcome {
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
+                SURFACE_ACK_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -241,6 +262,7 @@ mod tests {
             surface_delta: false,
             surface_scroll: false,
             surface_tab_baselines: false,
+            surface_ack: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -395,12 +417,26 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("surface_tab_baselines");
+        value.as_object_mut().unwrap().remove("surface_ack");
         let decoded: EndpointClientHello = serde_json::from_value(value).unwrap();
         assert!(decoded.surface_active);
         assert!(!decoded.surface_reuse);
         assert!(!decoded.surface_delta);
         assert!(!decoded.surface_scroll);
         assert!(!decoded.surface_tab_baselines);
+        assert!(!decoded.surface_ack);
+    }
+
+    #[test]
+    fn surface_ack_message_is_a_named_json_control() {
+        let crate::protocol::ClientMessage::EndpointControl { kind, data } =
+            surface_ack_message(u64::MAX)
+        else {
+            panic!("ack should use endpoint control");
+        };
+        assert_eq!(kind, SURFACE_ACK_KIND);
+        let ack: EndpointSurfaceAck = serde_json::from_str(&data).unwrap();
+        assert_eq!(ack.received, u64::MAX);
     }
 
     #[test]
@@ -421,6 +457,7 @@ mod tests {
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
+                SURFACE_ACK_CAPABILITY.to_string(),
             ]
         );
     }

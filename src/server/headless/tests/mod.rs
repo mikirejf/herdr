@@ -1,6 +1,7 @@
 use super::*;
 
 mod event_fairness;
+mod flow_control;
 mod native_graphics;
 #[path = "pane_focus.rs"]
 mod pane_focus_tests;

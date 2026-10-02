@@ -12,7 +12,7 @@ use crate::ipc::LocalStream;
 use crate::protocol::endpoint::{
     EndpointClientHello, EndpointServerWelcome, BLOB_CODEC_V1, ENDPOINT_HELLO_KIND,
     ENDPOINT_PROTOCOL_GENERATION, ENDPOINT_WELCOME_KIND, INPUT_CODEC_V1, SNAPSHOT_CODEC_V1,
-    SURFACE_CODEC_V1,
+    SURFACE_ACK_CAPABILITY, SURFACE_CODEC_V1,
 };
 use crate::protocol::{
     self, ClientMessage, RenderEncoding, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
@@ -128,6 +128,21 @@ fn set_handshake_recv_timeout(
         .map_err(ClientError::ConnectionFailed)
 }
 
+/// Byte acks bound what an SSH channel can queue ahead of input echo. A local socket has no such
+/// hidden buffer, so local connections skip the ack traffic.
+fn surface_ack_requested(local_transport: bool) -> bool {
+    !local_transport
+}
+
+/// The server advertises `surface_ack` to every client but enforces it only for a hello that
+/// asked for it, so the capability stays on the connection only when this client asked too.
+fn agreed_capabilities(mut capabilities: Vec<String>, surface_ack_requested: bool) -> Vec<String> {
+    if !surface_ack_requested {
+        capabilities.retain(|capability| capability != SURFACE_ACK_CAPABILITY);
+    }
+    capabilities
+}
+
 #[derive(Debug)]
 pub(super) struct HandshakeResult {
     pub(super) encoding: RenderEncoding,
@@ -202,6 +217,7 @@ pub(super) fn do_handshake(
             surface_delta: true,
             surface_scroll: true,
             surface_tab_baselines: true,
+            surface_ack: surface_ack_requested(local_transport),
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -288,7 +304,10 @@ pub(super) fn do_handshake(
         return Ok(HandshakeResult {
             encoding: RenderEncoding::SemanticFrame,
             endpoint_methods: Some(welcome.methods),
-            endpoint_capabilities: Some(welcome.capabilities),
+            endpoint_capabilities: Some(agreed_capabilities(
+                welcome.capabilities,
+                surface_ack_requested(local_transport),
+            )),
         });
     }
 
@@ -328,5 +347,124 @@ mod tests {
         assert!(!direct_graphics_capability(true, true, (0, 16), supported));
         assert!(!direct_graphics_capability(true, true, (8, 0), supported));
         assert!(!direct_graphics_capability(true, true, (8, 16), false));
+    }
+
+    #[cfg(unix)]
+    fn stream_pair(name: &str) -> (LocalStream, LocalStream, std::path::PathBuf) {
+        use interprocess::local_socket::traits::Listener as _;
+        let _ = name;
+        let path = std::path::PathBuf::from("/tmp").join(format!(
+            "hh{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
+        let accepting = std::thread::spawn(move || listener.accept().unwrap());
+        let client = crate::ipc::connect_local_stream(&path).unwrap();
+        (client, accepting.join().unwrap(), path)
+    }
+
+    /// Runs the client handshake against the real server handshake and returns whether the client
+    /// will ack, plus the server's flow counts for the connection.
+    #[cfg(unix)]
+    fn negotiate_surface_ack(local_transport: bool) -> (bool, Option<(u64, u64)>) {
+        use crate::server::client_transport::{handle_client_handshake, ServerEvent};
+        let (mut client, server, path) = stream_pair("surface-ack-negotiation");
+        let (events, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_quit = quit.clone();
+        let handle =
+            std::thread::spawn(move || handle_client_handshake(server, 1, &events, &server_quit));
+        let handshake = do_handshake(
+            &mut client,
+            80,
+            24,
+            8,
+            16,
+            false,
+            Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
+            false,
+            false,
+            true,
+            local_transport,
+        )
+        .unwrap();
+        let flow = match event_rx.blocking_recv().unwrap() {
+            ServerEvent::ClientShellConnected { writer, .. } => writer.test_flow_counts(),
+            other => panic!("expected ClientShellConnected, got {other:?}"),
+        };
+        let acks = super::super::endpoint::EndpointNegotiation::new(
+            handshake.endpoint_methods.unwrap_or_default(),
+            handshake.endpoint_capabilities.unwrap_or_default(),
+        )
+        .supports_surface_ack();
+        drop(client);
+        quit.store(true, std::sync::atomic::Ordering::Release);
+        handle.join().unwrap().unwrap();
+        let _ = std::fs::remove_file(path);
+        (acks, flow)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_endpoint_negotiates_surface_ack_with_a_current_server() {
+        assert_eq!(negotiate_surface_ack(false), (true, Some((0, 0))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_endpoint_does_not_negotiate_surface_ack() {
+        assert_eq!(negotiate_surface_ack(true), (false, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_endpoint_sends_no_acks_to_a_server_without_the_capability() {
+        let (mut client, mut server, path) = stream_pair("surface-ack-old-server");
+        let old_server = std::thread::spawn(move || {
+            let hello: ClientMessage = protocol::read_message(&mut server, MAX_FRAME_SIZE).unwrap();
+            let ClientMessage::EndpointControl { data, .. } = hello else {
+                panic!("expected endpoint hello");
+            };
+            let hello: EndpointClientHello = serde_json::from_str(&data).unwrap();
+            assert!(hello.surface_ack);
+            let mut welcome = EndpointServerWelcome::compatible(Vec::new());
+            welcome
+                .capabilities
+                .retain(|capability| capability != SURFACE_ACK_CAPABILITY);
+            protocol::write_message(
+                &mut server,
+                &ServerMessage::EndpointControl {
+                    kind: ENDPOINT_WELCOME_KIND.into(),
+                    data: serde_json::to_string(&welcome).unwrap(),
+                },
+            )
+            .unwrap();
+            server
+        });
+        let handshake = do_handshake(
+            &mut client,
+            80,
+            24,
+            8,
+            16,
+            false,
+            Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
+            false,
+            false,
+            true,
+            false,
+        )
+        .unwrap();
+        drop(old_server.join().unwrap());
+        assert!(!super::super::endpoint::EndpointNegotiation::new(
+            Vec::new(),
+            handshake.endpoint_capabilities.unwrap_or_default(),
+        )
+        .supports_surface_ack());
+        let _ = std::fs::remove_file(path);
     }
 }

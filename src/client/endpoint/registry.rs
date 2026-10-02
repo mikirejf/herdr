@@ -59,6 +59,11 @@ impl EndpointNegotiation {
     pub(crate) fn supports_health_check(&self) -> bool {
         self.supports_capability(crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY)
     }
+
+    /// The server bounds this connection's bytes in flight by the client's received-byte acks.
+    pub(crate) fn supports_surface_ack(&self) -> bool {
+        self.supports_capability(crate::protocol::endpoint::SURFACE_ACK_CAPABILITY)
+    }
 }
 
 pub(crate) struct EndpointConnection {

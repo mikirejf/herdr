@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,72 @@ struct FrameBatch {
 enum WriterCommand {
     Frames(Arc<Mutex<FrameBatch>>),
     Flush(mpsc::Sender<()>),
+    /// Wakes an idle worker to send the latest surface ack.
+    Ack,
+}
+
+/// The latest received-byte total the reader wants acknowledged. At most one `WriterCommand::Ack`
+/// sits in the command queue at a time, so acks never take the slots queued input needs.
+#[derive(Default)]
+struct AckSlot {
+    received: AtomicU64,
+    wake_queued: AtomicBool,
+}
+
+/// Reader-side handle that hands the writer the latest received-byte total.
+pub(crate) struct SurfaceAck {
+    slot: Arc<AckSlot>,
+    wake: mpsc::SyncSender<WriterCommand>,
+}
+
+impl SurfaceAck {
+    pub(crate) fn record(&self, received: u64) {
+        self.slot.received.store(received, Ordering::Release);
+        if self.slot.wake_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // A full queue means the worker has commands ahead and checks the slot before each one.
+        if self.wake.try_send(WriterCommand::Ack).is_err() {
+            self.slot.wake_queued.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Worker-side state: writes the slot's total when it moved past the last ack sent. The worker
+/// checks between frames, so an ack goes out ahead of queued input but after a frame already
+/// being written.
+#[derive(Default)]
+struct AckWriter {
+    slot: Arc<AckSlot>,
+    sent: u64,
+}
+
+impl AckWriter {
+    fn write_pending(
+        &mut self,
+        writer: &mut impl io::Write,
+        stopped: &AtomicBool,
+    ) -> io::Result<()> {
+        let received = self.slot.received.load(Ordering::Acquire);
+        if received <= self.sent {
+            return Ok(());
+        }
+        let mut frame = Vec::new();
+        crate::protocol::write_message(
+            &mut frame,
+            &crate::protocol::endpoint::surface_ack_message(received),
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        write_frame(writer, &frame, stopped)?;
+        self.sent = received;
+        Ok(())
+    }
+
+    fn take_wake(&mut self, writer: &mut impl io::Write, stopped: &AtomicBool) -> io::Result<()> {
+        // Clear before reading the total, so a total stored after this read queues a new wake.
+        self.slot.wake_queued.store(false, Ordering::Release);
+        self.write_pending(writer, stopped)
+    }
 }
 
 /// The UI batches complete frames until the worker claims them, so a short burst of tiny input
@@ -36,6 +102,7 @@ pub(crate) struct NativeEndpointTransport {
     queued_bytes: Arc<AtomicUsize>,
     stopped: Arc<AtomicBool>,
     error: Arc<Mutex<Option<io::Error>>>,
+    ack: Arc<AckSlot>,
 }
 
 impl NativeEndpointTransport {
@@ -51,6 +118,11 @@ impl NativeEndpointTransport {
         let worker_bytes = queued_bytes.clone();
         let worker_stop = stopped.clone();
         let worker_error = error.clone();
+        let ack = Arc::new(AckSlot::default());
+        let mut worker_ack = AckWriter {
+            slot: ack.clone(),
+            sent: 0,
+        };
         std::thread::Builder::new()
             .name("endpoint-writer".into())
             .spawn(move || {
@@ -59,14 +131,20 @@ impl NativeEndpointTransport {
                     if worker_stop.load(Ordering::Acquire) {
                         break;
                     }
-                    let batch = match command {
-                        WriterCommand::Frames(batch) => batch,
+                    let result = match command {
+                        WriterCommand::Frames(batch) => write_batch(
+                            &mut stream,
+                            &batch,
+                            &worker_stop,
+                            &worker_bytes,
+                            &mut worker_ack,
+                        ),
                         WriterCommand::Flush(done) => {
                             let _ = done.send(());
                             continue;
                         }
+                        WriterCommand::Ack => worker_ack.take_wake(&mut stream, &worker_stop),
                     };
-                    let result = write_batch(&mut stream, &batch, &worker_stop, &worker_bytes);
                     if let Err(error) = result {
                         if let Ok(mut slot) = worker_error.lock() {
                             *slot = Some(error);
@@ -82,7 +160,16 @@ impl NativeEndpointTransport {
             queued_bytes,
             stopped,
             error,
+            ack,
         })
+    }
+
+    /// A handle for the reader thread to acknowledge received server bytes on this connection.
+    pub(crate) fn surface_ack(&self) -> SurfaceAck {
+        SurfaceAck {
+            slot: self.ack.clone(),
+            wake: self.sender.clone(),
+        }
     }
 
     fn enqueue_frame(&mut self, frame: Vec<u8>) -> io::Result<()> {
@@ -196,6 +283,7 @@ fn write_batch(
     batch: &Mutex<FrameBatch>,
     stopped: &AtomicBool,
     queued_bytes: &AtomicUsize,
+    ack: &mut AckWriter,
 ) -> io::Result<()> {
     // Claim the frames before doing any I/O. The producer never waits for socket progress.
     let batch = std::mem::take(
@@ -207,7 +295,9 @@ fn write_batch(
         if stopped.load(Ordering::Acquire) {
             break;
         }
-        let result = write_frame(writer, &frame, stopped);
+        let result = ack
+            .write_pending(writer, stopped)
+            .and_then(|()| write_frame(writer, &frame, stopped));
         queued_bytes.fetch_sub(frame.len(), Ordering::AcqRel);
         result?;
     }
@@ -474,6 +564,7 @@ mod tests {
                 queued_bytes: Arc::new(AtomicUsize::new(0)),
                 stopped: Arc::new(AtomicBool::new(false)),
                 error: Arc::new(Mutex::new(None)),
+                ack: Arc::new(AckSlot::default()),
             },
             receiver,
         )
@@ -502,7 +593,14 @@ mod tests {
                 panic!("unexpected flush");
             };
             assert!(batch.lock().unwrap().bytes <= MAX_BATCH_BYTES);
-            write_batch(&mut received, &batch, &transport.stopped, &queued_bytes).unwrap();
+            write_batch(
+                &mut received,
+                &batch,
+                &transport.stopped,
+                &queued_bytes,
+                &mut AckWriter::default(),
+            )
+            .unwrap();
         }
         assert_eq!(received, expected);
         assert_eq!(queued_bytes.load(Ordering::Acquire), 0);
@@ -512,7 +610,14 @@ mod tests {
         let WriterCommand::Frames(batch) = receiver.try_recv().unwrap() else {
             panic!("expected a new batch after the worker claimed the previous one");
         };
-        write_batch(&mut received, &batch, &transport.stopped, &queued_bytes).unwrap();
+        write_batch(
+            &mut received,
+            &batch,
+            &transport.stopped,
+            &queued_bytes,
+            &mut AckWriter::default(),
+        )
+        .unwrap();
         crate::protocol::write_message(&mut expected, &ClientMessage::Detach).unwrap();
         assert_eq!(received, expected);
         assert_eq!(queued_bytes.load(Ordering::Acquire), 0);
@@ -539,6 +644,7 @@ mod tests {
             &batch,
             &transport.stopped,
             &transport.queued_bytes,
+            &mut AckWriter::default(),
         )
         .unwrap();
         let mut expected = Vec::new();
@@ -556,11 +662,83 @@ mod tests {
             &batch,
             &transport.stopped,
             &transport.queued_bytes,
+            &mut AckWriter::default(),
         )
         .unwrap();
         crate::protocol::write_message(&mut expected, &last).unwrap();
         assert_eq!(received, expected);
         assert_eq!(transport.queued_bytes.load(Ordering::Acquire), 0);
+    }
+
+    fn decode_frames(mut bytes: &[u8]) -> Vec<ClientMessage> {
+        let mut messages = Vec::new();
+        while !bytes.is_empty() {
+            messages.push(
+                crate::protocol::read_message(&mut bytes, crate::protocol::MAX_FRAME_SIZE).unwrap(),
+            );
+        }
+        messages
+    }
+
+    #[test]
+    fn surface_ack_wakes_are_coalesced_into_one_queued_command() {
+        let (transport, receiver) = queued_transport(MAX_QUEUED_BATCHES);
+        let ack = transport.surface_ack();
+        ack.record(10);
+        ack.record(20);
+        ack.record(30);
+        assert!(matches!(receiver.try_recv(), Ok(WriterCommand::Ack)));
+        assert!(receiver.try_recv().is_err(), "one wake covers later totals");
+
+        let mut worker = AckWriter {
+            slot: transport.ack.clone(),
+            sent: 0,
+        };
+        let mut written = Vec::new();
+        worker.take_wake(&mut written, &transport.stopped).unwrap();
+        assert_eq!(
+            decode_frames(&written),
+            vec![crate::protocol::endpoint::surface_ack_message(30)]
+        );
+        ack.record(40);
+        assert!(
+            matches!(receiver.try_recv(), Ok(WriterCommand::Ack)),
+            "a total after the wake was taken queues a new wake"
+        );
+    }
+
+    #[test]
+    fn surface_ack_goes_ahead_of_queued_input_and_is_sent_once() {
+        let (mut transport, receiver) = queued_transport(MAX_QUEUED_BATCHES);
+        let input = ClientMessage::Input {
+            data: b"typed".to_vec(),
+        };
+        transport.send(&input).unwrap();
+        transport.surface_ack().record(512);
+
+        let WriterCommand::Frames(batch) = receiver.try_recv().unwrap() else {
+            panic!("expected the input batch first in the queue");
+        };
+        let mut worker = AckWriter {
+            slot: transport.ack.clone(),
+            sent: 0,
+        };
+        let mut written = Vec::new();
+        write_batch(
+            &mut written,
+            &batch,
+            &transport.stopped,
+            &transport.queued_bytes,
+            &mut worker,
+        )
+        .unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(WriterCommand::Ack)));
+        worker.take_wake(&mut written, &transport.stopped).unwrap();
+        assert_eq!(
+            decode_frames(&written),
+            vec![crate::protocol::endpoint::surface_ack_message(512), input],
+            "the ack is written before queued input and not repeated by its own wake"
+        );
     }
 
     #[test]

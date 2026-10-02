@@ -20,7 +20,7 @@ pub(crate) use message_policy::*;
 pub(crate) use registry::*;
 pub(crate) use ssh_metadata::{SshMachineMetadata, SshMetadataCache};
 pub(crate) use supervisor::*;
-pub(crate) use writer::NativeEndpointTransport;
+pub(crate) use writer::{NativeEndpointTransport, SurfaceAck};
 
 const PROFILE_ID_BYTES: usize = 16;
 

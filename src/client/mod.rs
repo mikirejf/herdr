@@ -629,6 +629,7 @@ async fn run_client_loop(
             1,
             max_frame_size,
             surface_decoder,
+            negotiation.supports_surface_ack(),
         )?;
         let mut registry = endpoint::EndpointRegistry::new(transport, 1, negotiation);
         if state.shell.is_some() {
@@ -1369,6 +1370,9 @@ async fn run_client_loop(
                         shell.compose(state.reported_size.0, state.reported_size.1)
                     });
                     let reader_quit = writer.stop_handle();
+                    let reader_ack = negotiation
+                        .supports_surface_ack()
+                        .then(|| writer.surface_ack());
                     #[cfg(unix)]
                     state.start_endpoint_graphics_generation(&endpoint_id, generation);
                     write_stream.insert(
@@ -1391,6 +1395,7 @@ async fn run_client_loop(
                             endpoint_id,
                             generation,
                             surface_decoder,
+                            reader_ack,
                         );
                     });
                 }
