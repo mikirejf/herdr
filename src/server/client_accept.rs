@@ -17,8 +17,31 @@ use crate::server::client_transport::{self, ServerEvent};
 pub(crate) struct ClientListener {
     // Declared before `listener` so the reactor registration is removed before
     // the listener closes its fd.
-    readiness: Option<AsyncFd<ListenerFd>>,
+    wake: ListenerWake,
     listener: LocalListener,
+}
+
+enum ListenerWake {
+    Unregistered,
+    Registered(AsyncFd<ListenerFd>),
+    /// Registration failed. The loop's periodic housekeeping wake still
+    /// accepts, so the server keeps running with slower attaches.
+    Unavailable,
+}
+
+impl ListenerWake {
+    fn from_registration(registration: io::Result<AsyncFd<ListenerFd>>) -> Self {
+        match registration {
+            Ok(readiness) => Self::Registered(readiness),
+            Err(err) => {
+                warn!(
+                    err = %err,
+                    "client listener wake unavailable; new clients wait for the idle housekeeping wake"
+                );
+                Self::Unavailable
+            }
+        }
+    }
 }
 
 /// The listener fd without ownership: `ClientListener` owns the listener.
@@ -34,7 +57,7 @@ impl ClientListener {
     pub(crate) fn new(listener: LocalListener) -> io::Result<Self> {
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
         Ok(Self {
-            readiness: None,
+            wake: ListenerWake::Unregistered,
             listener,
         })
     }
@@ -48,21 +71,24 @@ impl ClientListener {
     /// client that arrives during the drain raises readiness again.
     ///
     /// The reactor registration happens on first use because tests build the
-    /// server outside a tokio runtime.
+    /// server outside a tokio runtime. If it fails, this pends forever and is
+    /// not retried. The only error returned means the reactor shut down.
     pub(crate) async fn wait_for_connection(&mut self) -> io::Result<()> {
-        let readiness = match self.readiness.take() {
-            Some(readiness) => readiness,
-            None => {
-                let LocalListener::UdSocket(listener) = &self.listener;
-                AsyncFd::with_interest(
-                    ListenerFd(listener.as_fd().as_raw_fd()),
-                    Interest::READABLE,
-                )?
+        if matches!(self.wake, ListenerWake::Unregistered) {
+            let LocalListener::UdSocket(listener) = &self.listener;
+            self.wake = ListenerWake::from_registration(AsyncFd::with_interest(
+                ListenerFd(listener.as_fd().as_raw_fd()),
+                Interest::READABLE,
+            ));
+        }
+        match &self.wake {
+            ListenerWake::Registered(readiness) => {
+                readiness.readable().await?.clear_ready();
+                Ok(())
             }
-        };
-        let readiness = self.readiness.insert(readiness);
-        readiness.readable().await?.clear_ready();
-        Ok(())
+            ListenerWake::Unavailable => std::future::pending().await,
+            ListenerWake::Unregistered => unreachable!("registration was just attempted"),
+        }
     }
 }
 
@@ -154,14 +180,19 @@ mod tests {
         }
     }
 
+    fn test_socket_path(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hca-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("client.sock");
+        let _ = std::fs::remove_file(&path);
+        (dir, path)
+    }
+
     // The timeouts only guard against a hang: readiness, not a timer, must
     // complete each wait.
     #[tokio::test]
     async fn connection_wakes_listener_wait_and_drain_rearms_it() {
-        let dir = std::env::temp_dir().join(format!("hca-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("client.sock");
-        let _ = std::fs::remove_file(&path);
+        let (dir, path) = test_socket_path("wake");
         let mut listener =
             ClientListener::new(crate::ipc::bind_local_listener(&path).unwrap()).unwrap();
 
@@ -189,6 +220,30 @@ mod tests {
                 "a drained listener must not stay ready"
             );
         }
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn failed_registration_pends_without_retrying_and_accept_still_works() {
+        let (dir, path) = test_socket_path("unavailable");
+        let mut listener =
+            ClientListener::new(crate::ipc::bind_local_listener(&path).unwrap()).unwrap();
+        listener.wake =
+            ListenerWake::from_registration(Err(io::Error::from_raw_os_error(libc::ENOSPC)));
+
+        let _client = crate::ipc::connect_local_stream(&path).unwrap();
+        for _ in 0..2 {
+            let wait = listener.wait_for_connection();
+            tokio::pin!(wait);
+            assert!(
+                poll_once(wait.as_mut()).is_pending(),
+                "an unavailable wake must pend even with a client waiting"
+            );
+        }
+        assert!(matches!(listener.wake, ListenerWake::Unavailable));
+        assert_eq!(accept_all(&listener), 1, "the periodic accept still drains");
+
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
