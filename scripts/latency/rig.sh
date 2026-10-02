@@ -7,9 +7,11 @@
 #
 # The rig: a user-level sshd on 127.0.0.1:SSHD_PORT, a delay_proxy.py in front
 # of it on PROXY_PORT (RTT_MS round trip; 66 ms is the real Mac <-> jan-box
-# minimum), a fake remote HOME with its own herdr server and a two-pane
-# workspace, and a fake client HOME with a local server, a local workspace and
-# the proxy saved as a machine. Both homes run herdr defaults. Every herdr call
+# minimum), a fake remote HOME with its own herdr server and a workspace of nine
+# tabs (the first has two panes side by side, the right one with 5000 lines of
+# random hex scrollback; the other eight are full screens of colored text), and a fake
+# client HOME with a local server, a local workspace and the proxy saved as a
+# machine. Both homes run herdr defaults. Every herdr call
 # runs under `env -i HOME=<fake home>`, so the real server, ~/.config/herdr and
 # ~/.ssh are never touched.
 #
@@ -328,12 +330,28 @@ setup() {
         || die "remote split"
     remote_herdr pane run "$left" "printf 'LEFT-PANE-%s\n' MARKER; git --no-pager log --oneline -15" >/dev/null \
         || die "remote pane run (left)"
-    remote_herdr pane run "$right" 'for i in $(seq 1 40); do echo RIGHT-PANE-LINE $i; done' >/dev/null \
+    # Deep scrollback for the wheel scroll scenario, and the pane ends at a shell prompt. Random
+    # hex rows, two per line, so every row differs from its neighbours across the pane's width
+    # the way real output does. The done marker is split so the typed command never contains it.
+    remote_herdr pane run "$right" "od -An -tx1 -v /dev/urandom | paste -d ' ' - - | head -n 5000; echo RIGHT-PANE-DON''E" >/dev/null \
         || die "remote pane run (right)"
     remote_herdr pane wait-output "$left" --match LEFT-PANE-MARKER --timeout 10000 >/dev/null \
         || die "remote left pane text missing"
-    remote_herdr pane wait-output "$right" --match 'RIGHT-PANE-LINE 40' --timeout 10000 >/dev/null \
+    remote_herdr pane wait-output "$right" --match RIGHT-PANE-DONE --timeout 20000 >/dev/null \
         || die "remote right pane text missing"
+
+    # Extra tabs the client has not visited, each a full screen of colored text that stops
+    # printing, so the client has several tab screens to prefetch.
+    local wsid tab tab_pane
+    wsid=$(json_field workspace.workspace_id <<<"$ws") || die "cannot read remote workspace id from: $ws"
+    for tab in $(seq 1 8); do
+        tab_pane=$(remote_herdr tab create --workspace "$wsid" --label "fill$tab" --no-focus \
+            | json_field root_pane.pane_id) || die "remote tab $tab"
+        remote_herdr pane run "$tab_pane" "for i in \$(seq 1 60); do printf '\\033[38;5;%dm\\033[48;5;%dm tab$tab line %02d \\033[0m \\033[1;3%dm%s\\033[0m\\n' \$((16 + i * 3 % 200)) \$((232 + i % 24)) \$i \$((1 + i % 7)) \"the quick brown fox jumps over the lazy dog \$((i * 7919))\"; done" >/dev/null \
+            || die "remote pane run (tab $tab)"
+        remote_herdr pane wait-output "$tab_pane" --match "tab$tab line 60" --timeout 10000 >/dev/null \
+            || die "remote tab $tab text missing"
+    done
 
     # Client side: local server with one local workspace, then the saved
     # machine that points at the delayed sshd.
@@ -359,7 +377,8 @@ bench() {
     "$HERE/ui_bench.py" -n "$N" \
         --remote-ws '· rigremote' --remote-marker LEFT-PANE-MARKER \
         --local-ws '· local' --local-marker LOCAL-PANE-MARKER \
-        --pane-cols 60,150 --trace "$RUN/trace.log" ${json[@]+"${json[@]}"} \
+        --pane-cols 60,150 --scroll-col 150 --echo-text ECHO \
+        --trace "$RUN/trace.log" ${json[@]+"${json[@]}"} \
         --label "RTT $RTT ms${LOSS_LABEL}, client $CLIENT_BIN, remote $HERDR_REMOTE_BIN" \
         -- $(client_command) &
     echo "$! ui_bench.py" >"$RUN/bench.pid"
@@ -401,7 +420,7 @@ if [ "$COMMAND" = setup ]; then
     echo "rig is up (stop with: $0 stop). Attach a client with:"
     echo "  $(client_command)"
     echo "or benchmark it with:"
-    echo "  $HERE/ui_bench.py --pane-cols 60,150 --trace $RUN/trace.log -- $(client_command)"
+    echo "  $HERE/ui_bench.py --pane-cols 60,150 --scroll-col 150 --trace $RUN/trace.log -- $(client_command)"
     exit 0
 fi
 

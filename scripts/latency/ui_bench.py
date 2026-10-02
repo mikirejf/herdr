@@ -24,6 +24,23 @@ Clicks are SGR mouse events. Scenarios run only when configured:
                      mid-height of the current screen. Visible when any cell of
                      the screen changes, so nothing else may be animating.
                      If a workspace switch ran, the remote workspace is current.
+  wheel scroll       --scroll-col C. Sends one SGR wheel-up event at column C
+                     (1-based) at mid-height, then one wheel-down to return,
+                     reported as "wheel up" and "wheel down". Visible when any
+                     cell changes. Column C is clicked first (untimed) so the
+                     wheel does not also move focus. The pane under C must be a terminal with
+                     more scrollback than N wheel steps that starts at the
+                     bottom, and nothing else may be animating.
+  echo in prefetch   --echo-text TEXT with the workspace switch flags. Each
+                     action: go to the local workspace, resize the client pty
+                     by one column (alternating) so the client prefetches the
+                     remote's other tab screens again, click the remote
+                     workspace, wait --echo-delay ms (default 350) after its
+                     marker shows, then type TEXT+nonce+counter (a random
+                     per-run nonce, checked to be off screen) into the focused
+                     remote pane. The timed part is the keypress to the token
+                     on screen. The pane must be a shell prompt; the typed
+                     line is cleared with ^U after each action.
 
 "visible" is when the chunk of pty output that made the condition true arrived,
 "settled" is the last pty output before 0.8 s of quiet, both in ms from the
@@ -43,6 +60,7 @@ import math
 import os
 import pty
 import queue
+import secrets
 import shlex
 import signal
 import statistics
@@ -180,6 +198,25 @@ class Client:
     def click(self, x, y):
         os.write(self.fd, f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m".encode())
 
+    def wheel(self, x, y, up):
+        os.write(self.fd, f"\x1b[<{64 if up else 65};{x};{y}M".encode())
+
+    def type(self, text):
+        os.write(self.fd, text.encode())
+
+    def resize(self, cols):
+        self.cols = cols
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, cols, 0, 0))
+        os.kill(self.pid, signal.SIGWINCH)
+        self.screen.resize(self.rows, cols)
+
+    def wait_until(self, cond, what, timeout=20):
+        end = time.monotonic() + timeout
+        while not cond():
+            if time.monotonic() > end:
+                sys.exit(f"ui_bench: {what} never happened\n{self.text()}")
+            self.pump(0.05)
+
     def wire(self, t0, t1, hit):
         """Wire bytes and up->down turnarounds through the proxy in [t0, t1], and the stamp of
         the last downstream chunk at or before `hit`."""
@@ -207,9 +244,12 @@ class Client:
         while (left := end - time.monotonic()) > 0:
             self.pump(min(left, 0.1))
 
-    def measure(self, label, done, action, timeout, idle=0):
+    def measure(self, label, done, action, timeout, idle=0, setup=None):
         self.idle(idle)
         self.settle(0.5)
+        # Untimed steps that must happen right before the action, so their output is not counted.
+        if setup:
+            setup()
         before = self.snapshot()
         b0 = self.nbytes
         t0 = time.monotonic()
@@ -284,9 +324,9 @@ def run_scenarios(client, args):
     results = {}
     timeout = args.timeout
 
-    def record(name, done, action):
+    def record(name, done, action, setup=None):
         results.setdefault(name, []).append(
-            client.measure(name, done, action, timeout, args.idle))
+            client.measure(name, done, action, timeout, args.idle, setup))
 
     if args.remote_ws:
         remote_xy = client.find(args.remote_ws)
@@ -315,6 +355,44 @@ def run_scenarios(client, args):
         client.settle(QUIET)
         for i in range(args.n):
             record("pane focus", changed, second if i % 2 == 0 else first)
+
+    if args.scroll_col:
+        y = client.rows // 2
+        changed = lambda before: client.snapshot() != before
+        # A wheel event over an unfocused pane also moves focus, which herdr paints at once, so
+        # focus the scroll pane first or the first sample would time that instead of scrolling.
+        client.click(args.scroll_col, y)
+        client.settle(QUIET)
+        # Up first, so each wheel-down has something to scroll back to.
+        for _ in range(args.n):
+            record("wheel up", changed, lambda: client.wheel(args.scroll_col, y, True))
+            record("wheel down", changed, lambda: client.wheel(args.scroll_col, y, False))
+
+    if args.echo_text:
+        base_cols = client.cols
+        nonce = secrets.token_hex(2)
+        for i in range(args.n):
+            token = f"{args.echo_text}{nonce}{i + 1}"
+
+            def prefetch_again(i=i):
+                client.click(*local_xy)
+                client.wait_until(lambda: at_local(None), "switch to the local workspace")
+                # A different surface size makes the client forget it has the remote's tab
+                # screens, so every action prefetches them again.
+                client.resize(base_cols - 1 + i % 2)
+                client.settle(QUIET)
+                client.click(*remote_xy)
+                client.wait_until(lambda: at_remote(None), "switch to the remote workspace")
+                client.idle(args.echo_delay / 1000)
+                # A token already on screen would count as an echo at the next chunk.
+                if token in client.text():
+                    sys.exit(f"ui_bench: echo token {token!r} is already on screen\n{client.text()}")
+
+            record("echo in prefetch", lambda before, token=token: token in client.text(),
+                   lambda token=token: client.type(token), setup=prefetch_again)
+            client.type("\x15")
+            client.settle(QUIET)
+        client.resize(base_cols)
     return results
 
 
@@ -332,6 +410,12 @@ def parse_args():
     p.add_argument("--local-ws", metavar="LABEL", help="sidebar label of the local workspace")
     p.add_argument("--local-marker", metavar="TEXT", help="text shown only in the local workspace")
     p.add_argument("--pane-cols", metavar="A,B", help="two screen columns (1-based) to click alternately")
+    p.add_argument("--scroll-col", type=int, metavar="C",
+                   help="screen column (1-based) to send mouse wheel events at, mid-height")
+    p.add_argument("--echo-text", metavar="TEXT",
+                   help="type TEXT+nonce+counter into the remote pane while the client prefetches tab screens")
+    p.add_argument("--echo-delay", type=float, default=350, metavar="MS",
+                   help="wait this long after the remote marker shows before typing (default 350)")
     p.add_argument("-n", type=int, default=5, help="measured repetitions per scenario (default 5)")
     p.add_argument("--timeout", type=float, default=30, metavar="SEC", help="per action (default 30)")
     p.add_argument("--idle", type=float, default=0, metavar="SEC",
@@ -356,8 +440,10 @@ def parse_args():
             assert len(args.pane_cols) == 2
         except (ValueError, AssertionError):
             p.error("--pane-cols wants two integers like 60,150")
-    if not args.remote_ws and not args.pane_cols:
-        p.error("configure a scenario: workspace switch flags and/or --pane-cols")
+    if args.echo_text and not args.remote_ws:
+        p.error("--echo-text needs the workspace switch flags")
+    if not args.remote_ws and not args.pane_cols and not args.scroll_col:
+        p.error("configure a scenario: workspace switch flags, --pane-cols and/or --scroll-col")
     if args.trace and not os.path.isfile(args.trace):
         p.error(f"--trace file not found: {args.trace}")
     return args, client
