@@ -745,6 +745,9 @@ async fn run_client_loop(
                 }
             }
         }
+        if pending_activation.is_none() {
+            request_tab_screens(&mut state, &mut write_stream);
+        }
         if let Some(shell) = state.shell.as_ref() {
             supervisors.spawn_due(
                 std::time::Instant::now(),
@@ -2038,6 +2041,12 @@ async fn run_client_loop(
                                         generation,
                                         projection,
                                     );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::TabScreen { tab_id, surface }) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.receive_tab_screen(&endpoint_id, tab_id, *surface);
                                 }
                                 continue;
                             }

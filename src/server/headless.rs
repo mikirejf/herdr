@@ -2323,6 +2323,10 @@ impl HeadlessServer {
                 self.sync_window_title();
                 true
             }
+            ServerEvent::ClientShellTabScreens { client_id, tab_ids } => {
+                self.send_tab_screens(client_id, &tab_ids);
+                false
+            }
             ServerEvent::ClientShellPaneInput {
                 client_id,
                 pane_id,

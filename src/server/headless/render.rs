@@ -373,6 +373,67 @@ impl HeadlessServer {
         })
     }
 
+    /// Sends each requested tab's screen as this connection would see it with that tab focused.
+    /// The connection's location, surface stream and pane sizes stay untouched.
+    pub(super) fn send_tab_screens(&mut self, client_id: u64, tab_ids: &[String]) {
+        let Some(client) = self.clients.get(&client_id) else {
+            return;
+        };
+        if !matches!(client.mode, ClientConnectionMode::ClientShell)
+            || !client.streams_shell_surface()
+        {
+            return;
+        }
+        let (cols, rows) = client.terminal_size;
+        let cell_size = if client.cell_size.is_known() {
+            client.cell_size
+        } else {
+            crate::kitty_graphics::HostCellSize::default()
+        };
+        let shown = self.shell_target_for_client(client_id);
+        for tab_id in tab_ids {
+            let Some((workspace_index, tab_index)) = self.app.parse_tab_id(tab_id) else {
+                continue;
+            };
+            let target = crate::ui::TabSurfaceTarget {
+                workspace_index,
+                tab_index,
+            };
+            if Some(target) == shown {
+                continue;
+            }
+            let Some(client) = self.clients.get(&client_id) else {
+                return;
+            };
+            // Popups and graphics belong to the presented surface; a preview never shows them.
+            let Ok(rendered) = render_client_shell_pane_surface(
+                &mut self.app,
+                Some(target),
+                Rect::new(0, 0, cols, rows),
+                false,
+                false,
+                cell_size,
+                &client.shell_graphics_delivery,
+                client_id,
+            ) else {
+                continue;
+            };
+            let surface = protocol::PaneSurfaceFrame {
+                boot_id: self.client_shell_boot_id.clone(),
+                projection_revision: 0,
+                surface_revision: 0,
+                frame: rendered.frame,
+                panes: rendered.panes,
+                splits: rendered.splits,
+                popup: None,
+                graphics: protocol::SurfaceGraphicsScene::default(),
+            };
+            if !self.send_to_client(client_id, protocol::tab_screens::message(tab_id, &surface)) {
+                return;
+            }
+        }
+    }
+
     pub(super) fn render_and_stream(&mut self) {
         self.render_and_stream_with_graphics_limit(MAX_GRAPHICS_FRAME_SIZE);
     }

@@ -386,3 +386,85 @@ fn tab_switch_within_a_workspace_previews_the_same_way() {
     assert_ne!(tab_style(&state, &buffer, "tab_1"), focused_style);
     assert_eq!(typed_pane(&mut state), "pane_3");
 }
+
+fn receive_screen(state: &mut ClientShellState, tab_id: &str, surface: PaneSurfaceFrame) {
+    state.receive_tab_screen(&ClientEndpointId::Local, tab_id.into(), surface);
+}
+
+#[test]
+fn received_screen_previews_a_never_visited_tab() {
+    let mut state = visited(&["tab_1"]);
+    receive_screen(&mut state, "tab_2", tab_surface(COLS, ROWS, "tab_2", 0));
+
+    focus_workspace(&mut state, "ws_2");
+
+    assert!(state.previewed_tab.is_some());
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_2"));
+    assert_eq!(typed_pane(&mut state), "pane_2");
+}
+
+#[test]
+fn received_screen_of_another_size_or_boot_is_dropped() {
+    let mut state = visited(&["tab_1"]);
+    receive_screen(&mut state, "tab_2", tab_surface(COLS + 1, ROWS, "tab_2", 0));
+    let mut old_boot = tab_surface(COLS, ROWS, "tab_4", 0);
+    old_boot.boot_id = "boot-0".into();
+    receive_screen(&mut state, "tab_4", old_boot);
+
+    assert!(state.remembered_tab_screens.is_empty());
+    focus_workspace(&mut state, "ws_2");
+    assert!(state.previewed_tab.is_none());
+}
+
+#[test]
+fn received_screen_does_not_replace_a_remembered_one() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let mut received = tab_surface(COLS, ROWS, "tab_2", 0);
+    received.frame.cells[0].symbol = "R".into();
+    receive_screen(&mut state, "tab_2", received);
+
+    focus_workspace(&mut state, "ws_2");
+
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_2"));
+}
+
+#[test]
+fn unseen_tabs_are_requested_once_per_settled_surface_size() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    let at = |ms| start + std::time::Duration::from_millis(ms);
+
+    assert!(state.take_tab_screen_requests(COLS, ROWS, at(0)).is_empty());
+    assert_eq!(
+        state.timer_delay(at(250)),
+        std::time::Duration::from_millis(50)
+    );
+    assert_eq!(
+        state.take_tab_screen_requests(COLS, ROWS, at(300)),
+        ["tab_3", "tab_4"]
+    );
+    assert!(state
+        .take_tab_screen_requests(COLS, ROWS, at(400))
+        .is_empty());
+    state.set_snapshot(Box::new(tabs_snapshot("tab_1", 9)));
+    assert!(state
+        .take_tab_screen_requests(COLS, ROWS, at(500))
+        .is_empty());
+
+    for (step, ms) in [1000, 1100, 1200].into_iter().enumerate() {
+        let cols = COLS + 1 + step as u16;
+        assert!(state
+            .take_tab_screen_requests(cols, ROWS, at(ms))
+            .is_empty());
+    }
+    assert!(state
+        .take_tab_screen_requests(COLS + 3, ROWS, at(1499))
+        .is_empty());
+    assert_eq!(
+        state.take_tab_screen_requests(COLS + 3, ROWS, at(1500)),
+        ["tab_3", "tab_2", "tab_4"]
+    );
+    assert!(state
+        .take_tab_screen_requests(COLS + 3, ROWS, at(1600))
+        .is_empty());
+}

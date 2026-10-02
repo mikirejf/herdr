@@ -6,6 +6,7 @@ pub(crate) mod surface_delta;
 pub(crate) mod surface_reuse;
 pub(crate) mod surface_scroll;
 pub(crate) mod surface_switch;
+pub(crate) mod tab_screens;
 mod wire;
 
 pub use wire::*;

@@ -11,6 +11,10 @@ pub(crate) enum EndpointControlMessage {
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
+    TabScreen {
+        tab_id: String,
+        surface: Box<crate::protocol::PaneSurfaceFrame>,
+    },
     Ignored,
 }
 
@@ -24,6 +28,14 @@ pub(crate) fn decode_endpoint_control(
     if kind == crate::protocol::endpoint::AGENT_COMPLETIONS_KIND {
         return Ok(serde_json::from_str(data)
             .map(EndpointControlMessage::AgentCompletions)
+            .unwrap_or(EndpointControlMessage::Ignored));
+    }
+    if kind == crate::protocol::tab_screens::MESSAGE_KIND {
+        return Ok(crate::protocol::tab_screens::decode(data)
+            .map(|(tab_id, surface)| EndpointControlMessage::TabScreen {
+                tab_id,
+                surface: Box::new(surface),
+            })
             .unwrap_or(EndpointControlMessage::Ignored));
     }
     if kind == crate::protocol::endpoint::AGENT_VIEW_PROJECTION_KIND {

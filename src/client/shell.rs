@@ -36,7 +36,7 @@ mod settings;
 mod state;
 mod surface_patch;
 mod tab_preview;
-use tab_preview::PreviewedTab;
+use tab_preview::{PreviewedTab, TabScreenRequests};
 mod text_editor;
 mod word_selection;
 mod worktrees;

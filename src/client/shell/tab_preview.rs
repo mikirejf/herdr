@@ -1,5 +1,20 @@
 use super::*;
-use crate::protocol::PaneSurfaceFrame;
+use crate::protocol::{ClientSurfaceSize, PaneSurfaceFrame};
+
+/// Tabs whose screens the active endpoint connection need not be asked for again: already
+/// requested or remembered at this boot and surface size.
+pub(super) struct TabScreenRequests {
+    endpoint_id: ClientEndpointId,
+    generation: Option<u64>,
+    boot_id: String,
+    size: ClientSurfaceSize,
+    /// When the surface took this size. Requests wait for it to settle, so a resize drag does
+    /// not ask for every tab at every intermediate size.
+    size_since: std::time::Instant,
+    tab_ids: HashSet<String>,
+}
+
+const TAB_SCREEN_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// A tab's remembered screen, shown while a focus request for that tab awaits its endpoint.
 pub(super) struct PreviewedTab {
@@ -136,6 +151,117 @@ impl ClientShellState {
         {
             self.previewed_tab = None;
         }
+    }
+
+    /// Tabs of the active endpoint to ask screens for, so a first switch to one can preview it.
+    /// Each tab is asked for once per connection, boot and surface size.
+    pub(crate) fn take_tab_screen_requests(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        now: std::time::Instant,
+    ) -> Vec<String> {
+        let size = self.surface_size(cols, rows);
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return Vec::new();
+        };
+        let previous = self.tab_screen_requests.take();
+        let size_since = previous
+            .as_ref()
+            .filter(|requests| requests.size == size)
+            .map_or(now, |requests| requests.size_since);
+        let mut requests = previous
+            .filter(|requests| {
+                requests.endpoint_id == self.active_endpoint_id
+                    && requests.generation == self.active_snapshot_generation
+                    && requests.boot_id == snapshot.boot_id
+                    && requests.size == size
+            })
+            .unwrap_or_else(|| TabScreenRequests {
+                endpoint_id: self.active_endpoint_id.clone(),
+                generation: self.active_snapshot_generation,
+                boot_id: snapshot.boot_id.clone(),
+                size,
+                size_since,
+                tab_ids: HashSet::new(),
+            });
+        if now.saturating_duration_since(size_since) < TAB_SCREEN_SIZE_SETTLE {
+            self.tab_screen_requests = Some(requests);
+            return Vec::new();
+        }
+        let mut wanted = Vec::new();
+        for tab in &snapshot.tabs {
+            if snapshot.focused_tab_id.as_ref() == Some(&tab.tab_id)
+                || requests.tab_ids.contains(&tab.tab_id)
+            {
+                continue;
+            }
+            requests.tab_ids.insert(tab.tab_id.clone());
+            let remembered = self
+                .remembered_tab_screens
+                .get(&(self.active_endpoint_id.clone(), tab.tab_id.clone()))
+                .is_some_and(|surface| {
+                    surface.boot_id == snapshot.boot_id
+                        && (surface.frame.width, surface.frame.height) == (size.cols, size.rows)
+                });
+            if !remembered {
+                wanted.push(tab.tab_id.clone());
+            }
+        }
+        self.tab_screen_requests = Some(requests);
+        wanted
+    }
+
+    /// When the surface size settles enough to ask for tab screens, if it has not yet.
+    pub(super) fn tab_screen_request_deadline(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<std::time::Instant> {
+        self.tab_screen_requests
+            .as_ref()
+            .map(|requests| requests.size_since + TAB_SCREEN_SIZE_SETTLE)
+            .filter(|deadline| *deadline > now)
+    }
+
+    /// Remembers a tab screen the endpoint rendered on request, unless it is stale or the client
+    /// already remembers a screen of that tab at this size.
+    pub(crate) fn receive_tab_screen(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        tab_id: String,
+        surface: PaneSurfaceFrame,
+    ) {
+        let Some((cols, rows)) = self.last_composed_size else {
+            return;
+        };
+        let size = self.surface_size(cols, rows);
+        if (surface.frame.width, surface.frame.height) != (size.cols, size.rows) {
+            return;
+        }
+        let current = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+            .and_then(|endpoint| endpoint.snapshot.as_deref())
+            .is_some_and(|snapshot| {
+                snapshot.boot_id == surface.boot_id
+                    && snapshot.tabs.iter().any(|tab| tab.tab_id == tab_id)
+            });
+        if !current {
+            return;
+        }
+        let key = (endpoint_id.clone(), tab_id);
+        if self
+            .remembered_tab_screens
+            .get(&key)
+            .is_some_and(|remembered| {
+                remembered.boot_id == surface.boot_id
+                    && (remembered.frame.width, remembered.frame.height) == (size.cols, size.rows)
+            })
+        {
+            return;
+        }
+        self.remembered_tab_screens.insert(key, surface);
     }
 
     /// Forgets remembered screens the active endpoint can no longer show.

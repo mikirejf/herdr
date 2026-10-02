@@ -894,6 +894,7 @@ pub(crate) struct ClientShellState {
     pub(super) previewed_tab: Option<PreviewedTab>,
     /// The last presented screen of each tab this client left, keyed by endpoint and tab ID.
     pub(super) remembered_tab_screens: HashMap<(ClientEndpointId, String), PaneSurfaceFrame>,
+    pub(super) tab_screen_requests: Option<TabScreenRequests>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
     pub(super) previous_pane_id: Option<String>,
@@ -1062,6 +1063,7 @@ impl ClientShellState {
             predicted_pane_focus: None,
             previewed_tab: None,
             remembered_tab_screens: HashMap::new(),
+            tab_screen_requests: None,
             reveal_navigation_workspace: false,
             overlay,
             previous_pane_id: None,
@@ -1872,6 +1874,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.tab_screen_request_deadline(now))
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

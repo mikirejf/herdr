@@ -95,6 +95,35 @@ pub(super) fn client_shell_resize_message(
     }
 }
 
+/// Asks the presenting endpoint for screens of tabs the client could not preview yet.
+pub(super) fn request_tab_screens(
+    state: &mut ClientState,
+    endpoints: &mut endpoint::EndpointRegistry,
+) {
+    let endpoint_id = endpoints.active_id().clone();
+    let Some(shell) = state.shell.as_mut().filter(|shell| {
+        shell.endpoint_is_active(&endpoint_id)
+            && endpoints
+                .connection(&endpoint_id)
+                .is_some_and(|connection| {
+                    connection.surface_active
+                        && connection
+                            .negotiation
+                            .supports_capability(protocol::tab_screens::CAPABILITY)
+                })
+    }) else {
+        return;
+    };
+    let tab_ids = shell.take_tab_screen_requests(
+        state.reported_size.0,
+        state.reported_size.1,
+        std::time::Instant::now(),
+    );
+    if !tab_ids.is_empty() {
+        endpoints.send_to(&endpoint_id, &protocol::tab_screens::request(&tab_ids));
+    }
+}
+
 pub(super) fn sync_client_shell_keyboard_report_all(
     state: &mut ClientState,
 ) -> Result<(), ClientError> {

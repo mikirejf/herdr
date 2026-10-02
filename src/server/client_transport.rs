@@ -527,6 +527,11 @@ pub(crate) enum ServerEvent {
     ClientShellSurfaceBackground { client_id: u64 },
     /// A client-owned shell presents the surface it kept following in the background.
     ClientShellSurfaceForeground { client_id: u64 },
+    /// A client-owned shell asked for the screens of tabs it has not shown yet.
+    ClientShellTabScreens {
+        client_id: u64,
+        tab_ids: Vec<String>,
+    },
     /// A client-owned shell invoked one endpoint operation through this connection.
     ClientShellEndpointRequest {
         client_id: u64,
@@ -1360,6 +1365,17 @@ fn client_read_loop_with_endpoint_controls(
                 if kind == crate::protocol::endpoint::SURFACE_FOREGROUND_KIND =>
             {
                 ServerEvent::ClientShellSurfaceForeground { client_id }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::tab_screens::REQUEST_KIND =>
+            {
+                match crate::protocol::tab_screens::decode_request(&data) {
+                    Ok(tab_ids) => ServerEvent::ClientShellTabScreens { client_id, tab_ids },
+                    Err(error) => {
+                        debug!(client_id, %error, "ignoring tab screen request");
+                        continue;
+                    }
+                }
             }
             ClientMessage::EndpointControl { kind, data } => {
                 let Some(response) = crate::server::client_endpoint_control::response(&kind, data)

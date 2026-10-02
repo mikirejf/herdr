@@ -155,3 +155,97 @@ async fn returning_to_a_workspace_restores_its_parked_surface() {
     assert_eq!(&back.surface, committed);
     shutdown_test_runtimes(&mut server);
 }
+
+#[tokio::test]
+async fn tab_screens_leave_focus_and_surface_baselines_alone() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![
+        workspace_with_screen("alpha", b"ALPHA screen"),
+        workspace_with_screen("beta", b"BETA screen"),
+    ];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (writer, control, render) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: true,
+            surface_delta: true,
+            surface_scroll: false,
+            surface_tab_baselines: true,
+            client_id: 7,
+            surface_cols: 80,
+            surface_rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: true,
+            mouse_capture: true,
+            surface_active: true,
+            writer,
+        })
+    );
+    let mut decoder = protocol::surface_reuse::Decoder::new(true, false).with_tab_baselines(true);
+    server.render_and_stream();
+    let first = drain_writes(&render, &mut decoder)
+        .pop()
+        .expect("first surface");
+    let alpha_tab = server.app.public_tab_id(0, 0).expect("alpha tab");
+    let beta_tab = server.app.public_tab_id(1, 0).expect("beta tab");
+
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellTabScreens {
+            client_id: 7,
+            tab_ids: vec![alpha_tab.clone(), "t_missing_1".into(), beta_tab.clone()],
+        })
+    );
+
+    let mut screens = Vec::new();
+    // The writer thread forwards control frames asynchronously; wait long for the first screen.
+    let mut wait = Duration::from_secs(1);
+    while let Ok(framed) = control.recv_timeout(wait) {
+        if let ServerMessage::EndpointControl { kind, data } = read_server_message(framed) {
+            if kind == protocol::tab_screens::MESSAGE_KIND {
+                screens.push(protocol::tab_screens::decode(&data).expect("tab screen"));
+                wait = Duration::from_millis(100);
+            }
+        }
+    }
+    let [(tab_id, screen)] = &screens[..] else {
+        panic!("expected only the unfocused tab's screen: {screens:?}");
+    };
+    assert_eq!(tab_id, &beta_tab);
+    assert_eq!(screen.boot_id, server.client_shell_boot_id);
+    assert_eq!((screen.frame.width, screen.frame.height), (80, 24));
+    assert!(frame_text(&screen.frame).contains("BETA screen"));
+    assert!(screen.panes.iter().any(|pane| pane.focused));
+    assert_eq!(server.shell_tab_id_for_client(7), Some(alpha_tab));
+    assert!(render.try_recv().is_err());
+
+    // The connection streams as if the screens were never sent.
+    focus_workspace(&mut server, 7, 1).await;
+    server.render_and_stream();
+    let away = drain_writes(&render, &mut decoder)
+        .pop()
+        .expect("surface after leaving");
+    assert!(frame_text(&away.surface.frame).contains("BETA screen"));
+    assert_eq!(
+        away.switch,
+        Some(SurfaceSwitch {
+            keep: vec![first.surface.surface_revision],
+            restore: None,
+        })
+    );
+    focus_workspace(&mut server, 7, 0).await;
+    server.render_and_stream();
+    let back = drain_writes(&render, &mut decoder)
+        .pop()
+        .expect("surface after return");
+    assert_eq!(
+        back.switch.as_ref().and_then(|switch| switch.restore),
+        Some(first.surface.surface_revision)
+    );
+    assert!(frame_text(&back.surface.frame).contains("ALPHA screen"));
+    shutdown_test_runtimes(&mut server);
+}
