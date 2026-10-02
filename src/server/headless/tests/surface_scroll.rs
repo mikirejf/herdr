@@ -280,3 +280,149 @@ async fn drained_wheel_scroll_queues_the_pane_and_wakes_the_loop() {
     );
     shutdown_test_runtimes(&mut server);
 }
+
+/// Output whose rows share no cells with each other, so only a shift can describe the scroll
+/// compactly. Repetitive output already diffs small cell by cell.
+fn varied_lines(range: std::ops::Range<usize>) -> Vec<u8> {
+    range
+        .map(|n| {
+            let a = (n as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let b = a.rotate_left(29).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            format!("{a:016x}{b:016x}{:016x}\r\n", a ^ b)
+        })
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn is_scroll_message(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::EndpointControl { kind, .. } if kind == protocol::surface_scroll::MESSAGE_KIND
+    )
+}
+
+/// Decodes a scroll message the way the client does and applies the expanded patch to the
+/// surface the client holds.
+fn apply_scroll_message(
+    decoder: &mut protocol::surface_reuse::Decoder,
+    held: &mut protocol::PaneSurfaceFrame,
+    message: ServerMessage,
+) {
+    assert!(is_scroll_message(&message), "expected a scroll message");
+    let ServerMessage::PaneSurfacePatch(patch) = decoder.decode(message).expect("scroll decode")
+    else {
+        panic!("expected an expanded pane patch");
+    };
+    crate::server::render_stream::apply_pane_surface_patch(held, &patch);
+}
+
+#[tokio::test]
+async fn full_render_after_scrolling_output_sends_a_shift_equal_to_a_full_surface() {
+    let (mut server, _control_rx, render_rx, pane_id) =
+        retained_test_server_with_control(&varied_lines(0..40));
+    server
+        .clients
+        .get_mut(&1)
+        .expect("scroll client")
+        .render_state
+        .enable_surface_scroll(true);
+    server.render_and_stream();
+    let mut decoder = protocol::surface_reuse::Decoder::new(false, true);
+    let ServerMessage::PaneSurface(mut held) = decoder
+        .decode(read_server_message(render_rx.recv().unwrap()))
+        .expect("initial surface")
+    else {
+        panic!("expected the initial pane surface");
+    };
+
+    // Seven lines is under half of the 24-row pane.
+    write_shared_test_pane(&mut server, pane_id, &varied_lines(40..47));
+    server.render_and_stream();
+    let bytes = render_rx.recv().unwrap();
+    let message = read_server_message(bytes.clone());
+    apply_scroll_message(&mut decoder, &mut held, message);
+    assert!(frame_text(&held.frame).contains(&format!(
+        "{:016x}",
+        47u64.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    )));
+    let committed = server.clients[&1]
+        .render_state
+        .last_pane_surface()
+        .expect("committed surface")
+        .clone();
+    assert_eq!(held, committed, "the server commits what the client holds");
+
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .render_state
+        .request_repaint();
+    server.render_and_stream();
+    let full = recv_pane_surface(&render_rx, "full comparison surface");
+    assert_eq!(held.frame, full.frame);
+    assert_eq!(held.panes, full.panes);
+    assert_eq!(held.splits, full.splits);
+    let full_bytes = HeadlessServer::frame_server_message(&ServerMessage::PaneSurface(full))
+        .expect("full frame");
+    assert!(
+        bytes.len() * 3 < full_bytes.len(),
+        "scroll frame {} should be far smaller than the full surface {}",
+        bytes.len(),
+        full_bytes.len()
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn backpressured_client_recovers_from_scrolling_output_with_a_shift() {
+    let (mut server, _control_rx, render_rx, pane_id) =
+        retained_test_server_with_control(&varied_lines(0..40));
+    server
+        .clients
+        .get_mut(&1)
+        .expect("scroll client")
+        .render_state
+        .enable_surface_scroll(true);
+    server.render_and_stream();
+    let mut decoder = protocol::surface_reuse::Decoder::new(false, true);
+    let ServerMessage::PaneSurface(mut held) = decoder
+        .decode(read_server_message(render_rx.recv().unwrap()))
+        .expect("initial surface")
+    else {
+        panic!("expected the initial pane surface");
+    };
+    let sources = HashSet::from([pane_id]);
+
+    // The first frame fills the render slot, so the second cannot be sent and the client
+    // falls back to the complete renderer.
+    write_shared_test_pane(&mut server, pane_id, &varied_lines(40..42));
+    assert!(server.render_retained_pane_surface_and_stream(&sources));
+    write_shared_test_pane(&mut server, pane_id, &varied_lines(42..45));
+    assert!(server.render_retained_pane_surface_and_stream(&sources));
+    assert_eq!(server.clients[&1].deferred_render(), DeferredRender::Full);
+
+    apply_scroll_message(
+        &mut decoder,
+        &mut held,
+        read_server_message(render_rx.recv().unwrap()),
+    );
+    assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 1 }));
+    server.render_and_stream();
+    apply_scroll_message(
+        &mut decoder,
+        &mut held,
+        read_server_message(render_rx.recv().unwrap()),
+    );
+    assert!(frame_text(&held.frame).contains(&format!(
+        "{:016x}",
+        45u64.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    )));
+    let committed = server.clients[&1]
+        .render_state
+        .last_pane_surface()
+        .expect("committed surface");
+    assert_eq!(&held, committed);
+    assert_eq!(server.clients[&1].deferred_render(), DeferredRender::None);
+    shutdown_test_runtimes(&mut server);
+}

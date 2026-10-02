@@ -222,6 +222,7 @@ impl ClientRenderState {
             surface_revision,
             surface_reuse,
             surface_delta,
+            surface_scroll,
             recompute_pending,
             tab_baselines,
             ..
@@ -244,16 +245,34 @@ impl ClientRenderState {
         {
             return None;
         }
+        let tab_baselines = tab_baselines.as_ref();
+        let changed_tab = tab.filter(|tab| {
+            tab_baselines.is_some_and(|baselines| baselines.tab.as_deref() != Some(*tab))
+        });
+        // A scrolled pane that only changed rows travels as a shift even when the retained
+        // patch path could not run, for example while the client's render slot was full.
+        if *surface_scroll && !has_file_upload && !*recompute_pending && changed_tab.is_none() {
+            let patch = last_surface.as_deref().and_then(|last| {
+                crate::server::surface_diff::scroll_message(
+                    last,
+                    &surface,
+                    surface_revision.saturating_add(1),
+                )
+            });
+            if let Some((message, patch)) = patch {
+                crate::render_prof::event("prepare_pane_surface.scroll_patch");
+                return Some(PreparedRender::SemanticPatch {
+                    message,
+                    encoded: Some(patch),
+                });
+            }
+        }
         surface.surface_revision = surface_revision.saturating_add(1);
         let assets = std::mem::take(&mut surface.graphics.assets);
         let queued_graphics_assets = assets.iter().map(|asset| asset.key.clone()).collect();
         let committed_surface = surface.clone();
         surface.graphics.assets = assets;
         let mut message = ServerMessage::PaneSurface(surface);
-        let tab_baselines = tab_baselines.as_ref();
-        let changed_tab = tab.filter(|tab| {
-            tab_baselines.is_some_and(|baselines| baselines.tab.as_deref() != Some(*tab))
-        });
         if let (Some(tab), Some(baselines), Some(last)) =
             (changed_tab, tab_baselines, last_surface.as_deref())
         {
