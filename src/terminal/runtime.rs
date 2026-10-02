@@ -431,6 +431,10 @@ impl TerminalRuntime {
         self.0.collect_dirty_patch_snapshot(area_width, area_height)
     }
 
+    pub(crate) fn mark_all_rows_dirty(&self) {
+        self.0.mark_all_rows_dirty();
+    }
+
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.0.visible_hyperlinks(area)
     }

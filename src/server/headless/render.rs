@@ -373,6 +373,30 @@ impl HeadlessServer {
         })
     }
 
+    fn mark_tab_rows_dirty(&self, target: crate::ui::TabSurfaceTarget) {
+        let Some(tab) = self
+            .app
+            .state
+            .workspaces
+            .get(target.workspace_index)
+            .and_then(|workspace| workspace.tabs.get(target.tab_index))
+        else {
+            return;
+        };
+        for &pane_id in tab.panes.keys() {
+            if tab.zoomed && tab.layout.focused() != pane_id {
+                continue;
+            }
+            if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                &self.app.terminal_runtimes,
+                target.workspace_index,
+                pane_id,
+            ) {
+                runtime.mark_all_rows_dirty();
+            }
+        }
+    }
+
     /// Sends each requested tab's screen as this connection would see it with that tab focused.
     /// The connection's location, surface stream and pane sizes stay untouched.
     pub(super) fn send_tab_screens(&mut self, client_id: u64, tab_ids: &[String]) {
@@ -406,7 +430,7 @@ impl HeadlessServer {
                 return;
             };
             // Popups and graphics belong to the presented surface; a preview never shows them.
-            let Ok(rendered) = render_client_shell_pane_surface(
+            let rendered = render_client_shell_pane_surface(
                 &mut self.app,
                 Some(target),
                 Rect::new(0, 0, cols, rows),
@@ -415,7 +439,11 @@ impl HeadlessServer {
                 cell_size,
                 &client.shell_graphics_delivery,
                 client_id,
-            ) else {
+            );
+            // Rendering consumed the panes' dirty rows, but this surface is not streamed to
+            // whoever shows the tab; the retained render still needs them.
+            self.mark_tab_rows_dirty(target);
+            let Ok(rendered) = rendered else {
                 continue;
             };
             let surface = protocol::PaneSurfaceFrame {

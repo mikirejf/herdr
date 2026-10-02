@@ -547,6 +547,10 @@ impl PaneTerminal {
         self.ghostty.collect_dirty_patch(area_width, area_height)
     }
 
+    pub fn mark_all_rows_dirty(&self) {
+        self.ghostty.mark_all_rows_dirty();
+    }
+
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.ghostty.visible_hyperlinks(area)
     }
@@ -2503,6 +2507,26 @@ impl GhosttyPaneTerminal {
                 ghostty_collect_dirty_patch(&mut core, area_width, area_height)
             })
             .unwrap_or(TerminalDirtyPatchOutcome::Fallback)
+    }
+
+    /// Marks every row dirty so the next dirty collection repaints the whole pane.
+    /// A render clears the shared dirty rows; a render that did not stream its result
+    /// calls this to hand them back.
+    pub fn mark_all_rows_dirty(&self) {
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        let render_state = &mut core.render_state;
+        let Ok(mut row_iterator) = crate::ghostty::RowIterator::new() else {
+            return;
+        };
+        let Ok(mut rows) = render_state.populate_row_iterator(&mut row_iterator) else {
+            return;
+        };
+        while rows.next() {
+            let _ = rows.set_dirty(true);
+        }
+        let _ = render_state.set_dirty(crate::ghostty::Dirty::Full);
     }
 }
 

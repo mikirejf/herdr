@@ -249,3 +249,99 @@ async fn tab_screens_leave_focus_and_surface_baselines_alone() {
     assert!(frame_text(&back.surface.frame).contains("ALPHA screen"));
     shutdown_test_runtimes(&mut server);
 }
+
+fn connect_surface_client(
+    server: &mut HeadlessServer,
+    client_id: u64,
+) -> (
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    let (writer, control, render) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: true,
+            surface_delta: true,
+            surface_scroll: false,
+            surface_tab_baselines: true,
+            client_id,
+            surface_cols: 80,
+            surface_rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: true,
+            mouse_capture: true,
+            surface_active: true,
+            writer,
+        })
+    );
+    (control, render)
+}
+
+#[tokio::test]
+async fn tab_screen_preview_leaves_pending_output_for_the_retained_render() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![
+        workspace_with_screen("alpha", b"ALPHA screen"),
+        workspace_with_screen("beta", b"BETA screen"),
+    ];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (_first_control, first_render) = connect_surface_client(&mut server, 7);
+    let (_second_control, second_render) = connect_surface_client(&mut server, 8);
+    focus_workspace(&mut server, 8, 1).await;
+    server.render_and_stream();
+    let beta_tab = server.app.public_tab_id(1, 0).expect("beta tab");
+    assert_ne!(server.shell_tab_id_for_client(7), Some(beta_tab.clone()));
+    assert_eq!(server.shell_tab_id_for_client(8), Some(beta_tab.clone()));
+    let mut first_decoder =
+        protocol::surface_reuse::Decoder::new(true, false).with_tab_baselines(true);
+    let mut second_decoder =
+        protocol::surface_reuse::Decoder::new(true, false).with_tab_baselines(true);
+    drain_writes(&first_render, &mut first_decoder);
+    drain_writes(&second_render, &mut second_decoder);
+
+    let beta_pane = server.app.state.workspaces[1]
+        .focused_pane_id()
+        .expect("beta pane");
+    server.app.state.workspaces[1].test_runtimes[&beta_pane]
+        .test_process_pty_bytes(b"\r\nBETA fresh output");
+
+    // Client 7 previews the tab client 8 is looking at, before the output is streamed.
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellTabScreens {
+            client_id: 7,
+            tab_ids: vec![beta_tab],
+        })
+    );
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([beta_pane])));
+
+    let committed = server.clients[&8]
+        .render_state
+        .last_pane_surface()
+        .expect("committed surface")
+        .clone();
+    let cell_size = server.clients[&8].cell_size;
+    let target = server.shell_target_for_client(8);
+    let fresh = render_client_shell_pane_surface(
+        &mut server.app,
+        target,
+        Rect::new(0, 0, 80, 24),
+        false,
+        false,
+        cell_size,
+        &Default::default(),
+        8,
+    )
+    .expect("fresh render");
+    assert!(frame_text(&fresh.frame).contains("BETA fresh output"));
+    assert_eq!(frame_text(&committed.frame), frame_text(&fresh.frame));
+    assert!(
+        committed.frame.cells == fresh.frame.cells,
+        "the retained surface must equal a fresh full render"
+    );
+    shutdown_test_runtimes(&mut server);
+}

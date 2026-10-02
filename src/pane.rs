@@ -3464,6 +3464,10 @@ impl PaneRuntime {
         (self.content_seq() == revision).then_some(snapshot)
     }
 
+    pub(crate) fn mark_all_rows_dirty(&self) {
+        self.terminal.mark_all_rows_dirty();
+    }
+
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.terminal.visible_hyperlinks(area)
     }
