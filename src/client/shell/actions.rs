@@ -152,6 +152,7 @@ impl ClientShellState {
                 }
                 if action == crate::input::KeybindAction::WorkspacePicker {
                     self.pending_workspace_highlight = None;
+                    self.previewed_tab = None;
                     self.mobile_switcher_scroll = 0;
                     self.reveal_mobile_workspace = false;
                     self.mode = ClientShellMode::Navigate;
@@ -378,11 +379,28 @@ impl ClientShellState {
             }
             _ => None,
         };
+        let previewed_tab = match &method {
+            crate::api::schema::Method::WorkspaceFocus(target) => {
+                self.snapshot.as_deref().and_then(|snapshot| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.workspace_id == target.workspace_id)
+                        .map(|workspace| workspace.active_tab_id.clone())
+                })
+            }
+            crate::api::schema::Method::TabFocus(target) => Some(target.tab_id.clone()),
+            _ => None,
+        };
         if changes_focus {
             outcome.repaint |= self.pending_workspace_highlight.take().is_some();
             if predicted_pane.is_none() {
                 outcome.repaint |= self.predicted_pane_focus.take().is_some();
             }
+            if previewed_tab.is_some() {
+                self.remember_focused_tab_screen();
+            }
+            outcome.repaint |= self.previewed_tab.take().is_some();
         }
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             let label = self.active_endpoint_label().to_owned();
@@ -439,6 +457,8 @@ impl ClientShellState {
         });
         if let Some(pane_id) = predicted_pane {
             outcome.repaint |= self.predict_pane_focus(pane_id, request_id);
+        } else if let Some(tab_id) = previewed_tab {
+            outcome.repaint |= self.start_tab_preview(&tab_id, request_id);
         }
         true
     }
@@ -552,6 +572,7 @@ impl ClientShellState {
             }
         }
         if let Err(error) = &result {
+            self.fail_tab_preview(request_id);
             if self
                 .pending_workspace_highlight
                 .as_ref()

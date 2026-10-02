@@ -183,9 +183,12 @@ impl ClientShellState {
             outcome,
         ) {
             // Endpoint handoffs already retain their coherent source frame in the runtime.
-            // Only retain a highlight if a focus request was actually enqueued.
-            if let Some(ClientShellAction::Endpoint { request, .. }) =
-                outcome.actions.get(action_index)
+            // Only retain a highlight if a focus request was actually enqueued and no tab
+            // preview already shows the target focused.
+            if let Some(ClientShellAction::Endpoint { request, .. }) = outcome
+                .actions
+                .get(action_index)
+                .filter(|_| self.previewed_tab.is_none())
             {
                 self.pending_workspace_highlight = Some(PendingWorkspaceHighlight {
                     target,

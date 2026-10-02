@@ -891,6 +891,9 @@ pub(crate) struct ClientShellState {
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
     pub(super) predicted_pane_focus: Option<PredictedPaneFocus>,
+    pub(super) previewed_tab: Option<PreviewedTab>,
+    /// The last presented screen of each tab this client left, keyed by endpoint and tab ID.
+    pub(super) remembered_tab_screens: HashMap<(ClientEndpointId, String), PaneSurfaceFrame>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
     pub(super) previous_pane_id: Option<String>,
@@ -1057,6 +1060,8 @@ impl ClientShellState {
             navigate_workspace_id: None,
             pending_workspace_highlight: None,
             predicted_pane_focus: None,
+            previewed_tab: None,
+            remembered_tab_screens: HashMap::new(),
             reveal_navigation_workspace: false,
             overlay,
             previous_pane_id: None,
@@ -1249,6 +1254,7 @@ impl ClientShellState {
         self.navigate_workspace_id = None;
         self.pending_workspace_highlight = None;
         self.predicted_pane_focus = None;
+        self.previewed_tab = None;
         self.overlay = self
             .config
             .startup_onboarding
@@ -1582,6 +1588,8 @@ impl ClientShellState {
                 self.pending_pane_surface = Some(surface);
             }
         }
+        self.evict_remembered_tab_screens();
+        self.reconcile_tab_preview();
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();
     }
@@ -1784,6 +1792,7 @@ impl ClientShellState {
             .set_scene(std::mem::take(&mut surface.graphics));
         self.pane_surface = Some(surface);
         self.pane_surface_generation = self.active_snapshot_generation;
+        self.confirm_tab_preview();
         self.invalidate_link_hover();
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();

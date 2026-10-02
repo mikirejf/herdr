@@ -232,6 +232,7 @@ impl ClientShellState {
     ) -> bool {
         self.pending_workspace_highlight = None;
         self.pending_agent_reveal = None;
+        outcome.repaint |= self.previewed_tab.take().is_some();
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();
@@ -287,6 +288,7 @@ impl ClientShellState {
             };
             self.push_endpoint_method(method, outcome);
         } else {
+            outcome.repaint |= self.previewed_tab.take().is_some();
             outcome.actions.push(ClientShellAction::ActivateEndpoint {
                 endpoint_id,
                 target: Some(target),

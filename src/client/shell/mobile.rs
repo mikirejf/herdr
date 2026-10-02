@@ -964,6 +964,7 @@ impl ClientShellState {
                 self.mobile_switcher_scroll = 0;
                 self.reveal_mobile_workspace = false;
                 self.pending_workspace_highlight = None;
+                self.previewed_tab = None;
                 self.mode = ClientShellMode::Navigate;
                 self.navigate_workspace_id = self.focused_navigation_target();
                 outcome.repaint = true;

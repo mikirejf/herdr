@@ -11,11 +11,16 @@ pub(super) struct PredictedPaneFocus {
 
 impl ClientShellState {
     /// The pane that receives keys and pane-targeted actions: the predicted pane while a focus
-    /// change is in flight, otherwise the endpoint's focused pane.
+    /// change is in flight, then the previewed tab's pane, otherwise the endpoint's focused pane.
     pub(super) fn focused_pane_id(&self) -> Option<String> {
         self.predicted_pane_focus
             .as_ref()
             .map(|predicted| predicted.pane_id.clone())
+            .or_else(|| {
+                self.previewed_tab
+                    .as_ref()
+                    .map(|preview| preview.pane_id.clone())
+            })
             .or_else(|| {
                 self.snapshot
                     .as_deref()
@@ -37,6 +42,7 @@ impl ClientShellState {
             .iter()
             .any(|tab| Some(&tab.tab_id) == snapshot.focused_tab_id.as_ref() && tab.zoomed);
         snapshot.pane_focus_style.is_some()
+            && self.previewed_tab.is_none()
             && !zoomed
             && self.pending_pane_surface.is_none()
             && surface.boot_id == snapshot.boot_id

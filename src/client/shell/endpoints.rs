@@ -112,6 +112,7 @@ impl ClientShellState {
         self.clear_machine_diagnostic(endpoint_id);
         if endpoint_id == &self.active_endpoint_id {
             self.pending_workspace_highlight = None;
+            self.previewed_tab = None;
         }
         self.retire_endpoint_notifications(endpoint_id);
         if let Some(endpoint) = self
@@ -144,6 +145,7 @@ impl ClientShellState {
         }
         if endpoint_id == &self.active_endpoint_id && status != ClientEndpointStatus::Online {
             self.pending_workspace_highlight = None;
+            self.previewed_tab = None;
         }
         if let Some(endpoint) = self
             .endpoints
@@ -233,6 +235,7 @@ impl ClientShellState {
             self.active_endpoint_id = endpoint_id.clone();
             self.pane_surface = None;
             self.pending_pane_surface = None;
+            self.previewed_tab = None;
         }
         self.apply_active_snapshot(snapshot, generation);
         if switching_endpoint {

@@ -61,7 +61,8 @@ impl ClientShellState {
         layout: ClientShellLayout,
         occlusion: &crate::kitty_graphics::surface::Occlusion,
     ) -> crate::kitty_graphics::GraphicsOutput {
-        let visibility = if self.endpoint_error.is_some() {
+        // The graphics scene belongs to the presented surface, not to a previewed tab.
+        let visibility = if self.endpoint_error.is_some() || self.previewed_tab.is_some() {
             crate::kitty_graphics::surface::Visibility::Hidden
         } else if self.hits.popup.is_some() {
             crate::kitty_graphics::surface::Visibility::Popup

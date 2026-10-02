@@ -262,3 +262,4 @@ mod mouse_selection;
 mod pane_focus;
 mod popup_focus_projection;
 mod startup_overlays;
+mod tab_preview;

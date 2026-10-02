@@ -173,18 +173,29 @@ impl ClientShellState {
         if self.snapshot.is_none() || self.pane_surface.is_none() {
             return Some(self.compose_unavailable(cols, rows).into());
         }
-        let snapshot = self.snapshot.as_deref()?;
-        // Do not compose a retained surface while waiting for its matching snapshot or
-        // connection generation.
-        if self.pending_pane_surface.is_some()
-            || self.pane_surface_generation != self.active_snapshot_generation
-        {
-            return None;
+        let size = self.surface_size(cols, rows);
+        if self.previewed_tab.as_ref().is_some_and(|preview| {
+            (preview.surface.frame.width, preview.surface.frame.height) != (size.cols, size.rows)
+        }) {
+            self.previewed_tab = None;
         }
-        let surface = self.pane_surface.as_ref()?;
-        if snapshot.revision != surface.projection_revision {
-            return None;
-        }
+        let (snapshot, surface) = if let Some(preview) = self.previewed_tab.as_ref() {
+            (&*preview.snapshot, &preview.surface)
+        } else {
+            let snapshot = self.snapshot.as_deref()?;
+            // Do not compose a retained surface while waiting for its matching snapshot or
+            // connection generation.
+            if self.pending_pane_surface.is_some()
+                || self.pane_surface_generation != self.active_snapshot_generation
+            {
+                return None;
+            }
+            let surface = self.pane_surface.as_ref()?;
+            if snapshot.revision != surface.projection_revision {
+                return None;
+            }
+            (snapshot, surface)
+        };
         let layout = self.layout(cols, rows);
         if self.last_tab_bar_width != Some(layout.tab_bar.width) {
             self.last_tab_bar_width = Some(layout.tab_bar.width);
@@ -573,7 +584,11 @@ impl ClientShellState {
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.hits.popup = None;
-        if let Some(popup) = surface.popup.as_deref() {
+        if let Some(popup) = surface
+            .popup
+            .as_deref()
+            .filter(|_| self.previewed_tab.is_none())
+        {
             let width = popup.width.map(client_popup_size);
             let height = popup.height.map(client_popup_size);
             if let Some(geometry) =
