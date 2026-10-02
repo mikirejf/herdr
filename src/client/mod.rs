@@ -619,6 +619,7 @@ async fn run_client_loop(
     } else {
         endpoint::EndpointRegistry::empty()
     };
+    let selection_writer = endpoint::SelectionWriter::spawn();
     let mut supervisors =
         endpoint::EndpointSupervisors::new(&endpoint_catalog.ssh, std::time::Instant::now());
     if federated {
@@ -1345,11 +1346,12 @@ async fn run_client_loop(
                 target,
                 force,
             } => {
+                let previous_selection = endpoint_catalog.selected_profile.clone();
                 if !endpoint_catalog.select_endpoint(&endpoint_id) {
                     continue;
                 }
-                if let Err(error) = endpoint_catalog.store_selection() {
-                    warn!(%error, "failed to persist desired endpoint selection");
+                if endpoint_catalog.selected_profile != previous_selection {
+                    selection_writer.store(endpoint_catalog.selected_profile.clone());
                 }
                 begin_endpoint_activation(
                     &mut state,

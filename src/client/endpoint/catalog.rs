@@ -149,12 +149,7 @@ impl EndpointCatalog {
 
     fn store_selection_to_path(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
-        let content = serde_json::to_vec_pretty(&EndpointSelection {
-            version: SELECTION_VERSION,
-            selected_profile: self.selected_profile.clone(),
-        })
-        .map_err(|error| format!("failed to encode endpoint selection: {error}"))?;
-        store_private_json(path, &content, "endpoint selection")
+        store_selection_value(path, &self.selected_profile)
     }
 
     pub(crate) fn add_ssh(
@@ -308,6 +303,74 @@ impl EndpointCatalog {
         let content = serde_json::to_vec_pretty(self)
             .map_err(|error| format!("failed to encode endpoint catalog: {error}"))?;
         store_private_json(path, &content, "endpoint catalog")
+    }
+}
+
+fn store_selection_value(path: &Path, selected: &Option<ProfileId>) -> Result<(), String> {
+    let content = serde_json::to_vec_pretty(&EndpointSelection {
+        version: SELECTION_VERSION,
+        selected_profile: selected.clone(),
+    })
+    .map_err(|error| format!("failed to encode endpoint selection: {error}"))?;
+    store_private_json(path, &content, "endpoint selection")
+}
+
+/// Persists endpoint selections on a background thread so switching machines
+/// never waits on disk syncs. Only the newest queued selection is written.
+/// Dropping the writer writes the last queued selection, then joins the thread.
+pub(crate) struct SelectionWriter {
+    sender: Option<std::sync::mpsc::Sender<Option<ProfileId>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SelectionWriter {
+    pub(crate) fn spawn() -> Self {
+        Self::spawn_to_path(selection_path())
+    }
+
+    fn spawn_to_path(path: PathBuf) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<Option<ProfileId>>();
+        let thread = std::thread::Builder::new()
+            .name("endpoint-selection-writer".into())
+            .spawn(move || {
+                while let Ok(mut selected) = receiver.recv() {
+                    while let Ok(newer) = receiver.try_recv() {
+                        selected = newer;
+                    }
+                    if let Err(error) = store_selection_value(&path, &selected) {
+                        tracing::warn!(%error, "failed to persist desired endpoint selection");
+                    }
+                }
+            });
+        match thread {
+            Ok(thread) => Self {
+                sender: Some(sender),
+                thread: Some(thread),
+            },
+            Err(error) => {
+                tracing::warn!(%error, "failed to start endpoint selection writer");
+                Self {
+                    sender: None,
+                    thread: None,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn store(&self, selected: Option<ProfileId>) {
+        if let Some(sender) = &self.sender {
+            // The thread only exits after the sender is dropped.
+            let _ = sender.send(selected);
+        }
+    }
+}
+
+impl Drop for SelectionWriter {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -526,6 +589,32 @@ mod tests {
             Some(id)
         );
         std::fs::remove_dir_all(catalog_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn selection_writer_persists_newest_selection_on_drop() {
+        let path = path("selection-writer").with_file_name("selection.json");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let ids: Vec<ProfileId> = (0..20)
+            .map(|index| ProfileId::parse(format!("{index:032x}")).unwrap())
+            .collect();
+
+        let writer = SelectionWriter::spawn_to_path(path.clone());
+        for id in &ids {
+            writer.store(Some(id.clone()));
+        }
+        writer.store(None);
+        writer.store(ids.last().cloned());
+        drop(writer);
+
+        assert_eq!(
+            load_selection_from_path(&path)
+                .unwrap()
+                .unwrap()
+                .selected_profile,
+            ids.last().cloned()
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
