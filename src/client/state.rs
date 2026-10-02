@@ -91,7 +91,10 @@ pub(super) struct ClientState {
     /// they apply right after the frame they describe.
     pub(super) committed_effects: std::collections::VecDeque<ClientLoopEvent>,
     pub(super) deferred_surface: Option<DeferredSurfacePresentation>,
+    /// Applied updates in the held frame, reported to the profiler when it is presented.
     pub(super) deferred_surface_updates: usize,
+    /// Queued surface messages drained while the frame is held, whatever their outcome.
+    pub(super) deferred_surface_drained: usize,
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,
@@ -164,6 +167,7 @@ impl ClientState {
             committed_effects: Default::default(),
             deferred_surface: None,
             deferred_surface_updates: 0,
+            deferred_surface_drained: 0,
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
             shell: Some(shell::ClientShellState::new(
@@ -348,8 +352,8 @@ impl ClientState {
         let _ = stdout.flush();
     }
 
-    /// Records a pane surface update the shell already holds. The caller presents it with
-    /// `present_deferred_surface` once no further surface update is waiting.
+    /// Records a pane surface update the shell already holds. The loop presents it through
+    /// `next_held_surface_event` once no further surface message is waiting.
     pub(super) fn defer_surface_presentation(
         &mut self,
         patch: Option<shell::ClientComposedSurfacePatch>,
@@ -365,15 +369,45 @@ impl ClientState {
         self.deferred_surface.is_some()
     }
 
-    pub(super) fn deferred_surface_batch_full(&self) -> bool {
-        self.deferred_surface_updates >= MAX_DEFERRED_SURFACE_UPDATES
+    /// Picks the event the loop handles next. While a surface frame is held back and nothing
+    /// is scheduled, it takes an already queued event from `try_next` without waiting. A
+    /// surface message joins the held frame; anything else, an empty queue, or the
+    /// `MAX_DEFERRED_SURFACE_UPDATES`th drained message presents it first. Every drained surface
+    /// message counts, whatever endpoint sent it and whether it applies, so the loop always
+    /// returns to its blocking wait (timers, health checks) within a bounded number of events.
+    /// `None` means the caller should wait for the next event.
+    pub(super) fn next_held_surface_event(
+        &mut self,
+        scheduled: Option<ClientLoopEvent>,
+        activation_pending: bool,
+        try_next: impl FnOnce() -> Option<ClientLoopEvent>,
+    ) -> Option<ClientLoopEvent> {
+        self.next_held_surface_event_to(&mut io::stdout(), scheduled, activation_pending, try_next)
     }
 
-    pub(super) fn present_deferred_surface(&mut self) {
-        self.present_deferred_surface_to(&mut io::stdout());
+    fn next_held_surface_event_to(
+        &mut self,
+        writer: &mut impl io::Write,
+        scheduled: Option<ClientLoopEvent>,
+        activation_pending: bool,
+        try_next: impl FnOnce() -> Option<ClientLoopEvent>,
+    ) -> Option<ClientLoopEvent> {
+        let drain = scheduled.is_none() && self.surface_presentation_deferred();
+        let event = if drain { try_next() } else { scheduled };
+        let continues = event
+            .as_ref()
+            .is_some_and(|event| continues_surface_batch(event, activation_pending));
+        if drain && continues {
+            self.deferred_surface_drained += 1;
+        }
+        if !continues || self.deferred_surface_drained >= MAX_DEFERRED_SURFACE_UPDATES {
+            self.present_deferred_surface_to(writer);
+        }
+        event
     }
 
     fn present_deferred_surface_to(&mut self, writer: &mut impl io::Write) {
+        self.deferred_surface_drained = 0;
         let Some(deferred) = self.deferred_surface.take() else {
             return;
         };
@@ -829,17 +863,113 @@ mod surface_batch_tests {
         assert!(terminal.text().contains('δ'));
     }
 
-    #[test]
-    fn a_full_batch_asks_to_present() {
-        let mut state = presented_state();
-        for base in 1..MAX_DEFERRED_SURFACE_UPDATES as u64 {
-            apply(&mut state, patch(base, "α"));
-            assert!(!state.deferred_surface_batch_full());
+    const ACTIVE: u64 = 1;
+    const BACKGROUND: u64 = 2;
+
+    /// A queued surface message. The generation only tells `drive` how to handle it.
+    fn queued_surface(generation: u64) -> ClientLoopEvent {
+        ClientLoopEvent::ServerMessage {
+            endpoint_id: endpoint::ClientEndpointId::Local,
+            generation,
+            message: Box::new(crate::protocol::ServerMessage::PaneSurface(surface())),
         }
-        apply(&mut state, patch(MAX_DEFERRED_SURFACE_UPDATES as u64, "β"));
-        assert!(state.deferred_surface_batch_full());
-        state.present_deferred_surface_to(&mut Terminal::default());
-        assert!(!state.deferred_surface_batch_full());
+    }
+
+    /// Runs the client loop's event choice over `queue`. Active messages apply a patch and hold
+    /// the frame like the loop's surface handlers; background messages change nothing on screen.
+    /// Returns, for each terminal write, how many events were taken while the frame was held.
+    fn drive(
+        state: &mut ClientState,
+        terminal: &mut Terminal,
+        revision: &mut u64,
+        queue: impl IntoIterator<Item = ClientLoopEvent>,
+    ) -> Vec<usize> {
+        let mut queue = queue.into_iter().collect::<std::collections::VecDeque<_>>();
+        let mut held_events = 0;
+        let mut writes = Vec::new();
+        loop {
+            let held = state.surface_presentation_deferred();
+            let flushes = terminal.flushes;
+            let event = state
+                .next_held_surface_event_to(terminal, None, false, || queue.pop_front())
+                // The loop's blocking wait.
+                .or_else(|| queue.pop_front());
+            if held && event.is_some() {
+                held_events += 1;
+            }
+            if terminal.flushes > flushes {
+                writes.push(std::mem::take(&mut held_events));
+            }
+            let Some(ClientLoopEvent::ServerMessage { generation, .. }) = event else {
+                return writes;
+            };
+            if generation == ACTIVE {
+                apply(state, patch(*revision, "α"));
+                *revision += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn queued_background_surfaces_present_the_held_frame_at_the_cap() {
+        let mut state = presented_state();
+        apply(&mut state, patch(1, "α"));
+        let mut terminal = Terminal::default();
+
+        let writes = drive(
+            &mut state,
+            &mut terminal,
+            &mut 2,
+            (0..MAX_DEFERRED_SURFACE_UPDATES + 40).map(|_| queued_surface(BACKGROUND)),
+        );
+
+        assert_eq!(writes, vec![MAX_DEFERRED_SURFACE_UPDATES]);
+        assert!(terminal.text().contains('α'));
+        assert!(!state.surface_presentation_deferred());
+        assert_eq!(state.deferred_surface_drained, 0);
+    }
+
+    #[test]
+    fn mixed_queued_surfaces_write_once_per_capped_batch() {
+        let mut state = presented_state();
+        apply(&mut state, patch(1, "α"));
+        let mut terminal = Terminal::default();
+        let total = 3 * MAX_DEFERRED_SURFACE_UPDATES;
+
+        let writes = drive(
+            &mut state,
+            &mut terminal,
+            &mut 2,
+            (0..total)
+                .map(|index| queued_surface(if index % 3 == 0 { ACTIVE } else { BACKGROUND })),
+        );
+
+        assert!(
+            writes
+                .iter()
+                .all(|&events| events <= MAX_DEFERRED_SURFACE_UPDATES),
+            "{writes:?}"
+        );
+        assert_eq!(writes.len(), 3, "{writes:?}");
+        assert_eq!(terminal.flushes, writes.len());
+        assert!(!state.surface_presentation_deferred());
+    }
+
+    #[test]
+    fn queued_active_surfaces_present_as_one_write_when_the_queue_empties() {
+        let mut state = presented_state();
+        apply(&mut state, patch(1, "α"));
+        let mut terminal = Terminal::default();
+
+        let writes = drive(
+            &mut state,
+            &mut terminal,
+            &mut 2,
+            (0..3).map(|_| queued_surface(ACTIVE)),
+        );
+
+        assert_eq!(writes, vec![3]);
+        assert_eq!(terminal.flushes, 1);
     }
 }
 

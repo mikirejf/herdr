@@ -488,6 +488,7 @@ async fn run_client_loop(
         committed_effects: Default::default(),
         deferred_surface: None,
         deferred_surface_updates: 0,
+        deferred_surface_drained: 0,
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
@@ -796,39 +797,28 @@ async fn run_client_loop(
             .pop_front()
             .or_else(|| scheduled_activation.take());
         // Surface updates that are already queued join the held-back frame, so a burst costs one
-        // terminal write. Anything else, an empty queue, or a full batch presents it first.
-        let immediate_event = if immediate_event.is_none()
-            && state.surface_presentation_deferred()
-            && !state.deferred_surface_batch_full()
-        {
-            #[cfg(windows)]
-            let queued = stdin_rx
-                .try_recv()
-                .ok()
-                .or_else(|| {
-                    supervisor_rx
-                        .try_recv()
-                        .ok()
-                        .map(ClientLoopEvent::EndpointSupervisor)
-                })
-                .or_else(|| event_rx.try_recv().ok());
-            #[cfg(unix)]
-            let queued = supervisor_rx
-                .try_recv()
-                .ok()
-                .map(ClientLoopEvent::EndpointSupervisor)
-                .or_else(|| event_rx.try_recv().ok());
-            queued
-        } else {
-            immediate_event
-        };
-        if state.deferred_surface_batch_full()
-            || immediate_event
-                .as_ref()
-                .is_none_or(|event| !continues_surface_batch(event, pending_activation.is_some()))
-        {
-            state.present_deferred_surface();
-        }
+        // terminal write.
+        let immediate_event =
+            state.next_held_surface_event(immediate_event, pending_activation.is_some(), || {
+                #[cfg(windows)]
+                let queued = stdin_rx
+                    .try_recv()
+                    .ok()
+                    .or_else(|| {
+                        supervisor_rx
+                            .try_recv()
+                            .ok()
+                            .map(ClientLoopEvent::EndpointSupervisor)
+                    })
+                    .or_else(|| event_rx.try_recv().ok());
+                #[cfg(unix)]
+                let queued = supervisor_rx
+                    .try_recv()
+                    .ok()
+                    .map(ClientLoopEvent::EndpointSupervisor)
+                    .or_else(|| event_rx.try_recv().ok());
+                queued
+            });
         #[cfg(windows)]
         let event = if let Some(event) = immediate_event {
             event
