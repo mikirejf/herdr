@@ -297,6 +297,39 @@ pub(super) fn render_pane_surface(
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
 ) -> Result<RenderedPaneSurface, SurfaceRenderDeferred> {
+    render_pane_surface_with_graphics(
+        app,
+        target,
+        area,
+        resize_panes,
+        show_popup,
+        cell_size,
+        Some((graphics_delivery, client_id)),
+    )
+}
+
+/// Renders a surface whose graphics scene is never read, so the scene stays empty and
+/// no image placements are collected.
+pub(super) fn render_pane_surface_without_graphics(
+    app: &mut app::App,
+    target: Option<crate::ui::TabSurfaceTarget>,
+    area: Rect,
+    resize_panes: bool,
+    show_popup: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) -> Result<RenderedPaneSurface, SurfaceRenderDeferred> {
+    render_pane_surface_with_graphics(app, target, area, resize_panes, show_popup, cell_size, None)
+}
+
+fn render_pane_surface_with_graphics(
+    app: &mut app::App,
+    target: Option<crate::ui::TabSurfaceTarget>,
+    area: Rect,
+    resize_panes: bool,
+    show_popup: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    graphics: Option<(&crate::kitty_graphics::surface::DeliveryCache, u64)>,
+) -> Result<RenderedPaneSurface, SurfaceRenderDeferred> {
     let layout = crate::ui::compute_tab_surface_for(
         &app.state,
         &app.terminal_runtimes,
@@ -443,8 +476,8 @@ pub(super) fn render_pane_surface(
     let popup = show_popup
         .then(|| render_popup_surface(app, area, resize_panes, cell_size))
         .flatten();
-    let (graphics, next_graphics_delivery, graphics_sources) =
-        crate::server::client_shell_graphics::collect(
+    let (graphics, next_graphics_delivery, graphics_sources) = match graphics {
+        Some((graphics_delivery, client_id)) => crate::server::client_shell_graphics::collect(
             app,
             &layout.pane_infos,
             &layout.split_borders,
@@ -453,7 +486,9 @@ pub(super) fn render_pane_surface(
             cell_size,
             graphics_delivery,
             client_id,
-        );
+        ),
+        None => Default::default(),
+    };
     if let Some(target) = target {
         for (&pane_id, &(epoch, _)) in &content_revisions_before {
             if let Some(runtime) = app.state.runtime_for_pane_in_workspace(

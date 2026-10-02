@@ -413,6 +413,47 @@ async fn client_shell_surface_projects_terminal_kitty_images_from_authoritative_
 }
 
 #[tokio::test]
+async fn surface_without_graphics_skips_collection_and_keeps_the_rest_identical() {
+    let (mut server, _control_rx, _client_rx, _pane_id) = retained_test_server_with_control(
+        b"text\x1b_Ga=T,f=32,t=d,i=7,p=3,s=1,v=1,c=1,r=1,q=2;/wAA/w==\x1b\\",
+    );
+    let cell_size = crate::kitty_graphics::HostCellSize {
+        width_px: 10,
+        height_px: 20,
+    };
+    let target = server.shell_target_for_client(1);
+    let area = Rect::new(0, 0, 80, 24);
+
+    let collected = crate::server::client_shell::render_pane_surface(
+        &mut server.app,
+        target,
+        area,
+        false,
+        false,
+        cell_size,
+        &Default::default(),
+        1,
+    )
+    .expect("render with graphics");
+    assert_eq!(collected.graphics.placements.len(), 1);
+    assert_eq!(collected.graphics.assets.len(), 1);
+
+    let skipped = crate::server::client_shell::render_pane_surface_without_graphics(
+        &mut server.app,
+        target,
+        area,
+        false,
+        false,
+        cell_size,
+    )
+    .expect("render without graphics");
+    assert_eq!(skipped.graphics, protocol::SurfaceGraphicsScene::default());
+    assert!(frame_text(&skipped.frame).contains("text"));
+    assert_eq!(skipped.frame.cells, collected.frame.cells);
+    assert_eq!(skipped.panes, collected.panes);
+}
+
+#[tokio::test]
 async fn client_shell_delivers_equal_pixels_for_distinct_terminal_image_ids() {
     let (mut server, _control_rx, client_rx, _pane_id) = retained_test_server_with_control(
         b"\x1b_Ga=T,f=32,t=d,i=7,p=3,s=1,v=1,c=1,r=1,q=2;/wAA/w==\x1b\\\x1b_Ga=T,f=32,t=d,i=8,p=4,s=1,v=1,c=1,r=1,q=2;/wAA/w==\x1b\\",

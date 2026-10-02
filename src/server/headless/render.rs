@@ -426,19 +426,14 @@ impl HeadlessServer {
             if Some(target) == shown {
                 continue;
             }
-            let Some(client) = self.clients.get(&client_id) else {
-                return;
-            };
             // Popups and graphics belong to the presented surface; a preview never shows them.
-            let rendered = render_client_shell_pane_surface(
+            let rendered = crate::server::client_shell::render_pane_surface_without_graphics(
                 &mut self.app,
                 Some(target),
                 Rect::new(0, 0, cols, rows),
                 false,
                 false,
                 cell_size,
-                &client.shell_graphics_delivery,
-                client_id,
             );
             // Rendering consumed the panes' dirty rows, but this surface is not streamed to
             // whoever shows the tab; the retained render still needs them.
