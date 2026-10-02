@@ -12,6 +12,7 @@ Reuse these tools. Extend one when it lacks a scenario; write a new script only 
 | Did my change make the remote UI faster, in round trips and bytes? | `scripts/latency/rig.sh run [RTT_MS=66] [N=5]` |
 | How fast is the real remote machine right now? | `scripts/latency/ui_bench.py ... -- <client command>` |
 | Is the slowness the network (loss, bufferbloat) and not herdr? | `scripts/latency/net_probe.py andrej@jan-box` |
+| Does typing echo stay fast behind a burst of screen data on a slow link? | `RATE_KBIT=1000 scripts/latency/rig.sh run 66 20` (see Capping bandwidth) |
 
 ## Comparing builds with the rig
 
@@ -51,6 +52,30 @@ The real jan-box link loses ~1%, mostly server to client, and TCP turns one lost
 3. `rig.sh stop` if you used `setup`, then `sudo scripts/latency/lo_netem.sh off`.
 
 Dummynet loss is random per packet; the real link drops back-to-back segments, so the real tail is worse. `lo_netem.sh status` shows whether shaping is on.
+
+## Capping bandwidth
+
+Without a cap, bytes never pile up on the rig link. `RATE_KBIT=<kbit/s>` makes `delay_proxy.py` serialise each direction at that rate with a bounded queue (`QUEUE_KB`, default 128). A full queue stops the proxy reading, so TCP backpressure fills sshd's buffers as on a real slow link. `rig.sh` prints `shaping: proxy rate cap ...` and adds the `echo under bulk` scenario to `run`:
+
+```
+HRIG_DIR=/tmp/hrbw HERDR_BIN=$PWD/target/release/herdr HERDR_REMOTE_BIN=$PWD/target/release/herdr \
+  RATE_KBIT=1000 scripts/latency/rig.sh run 66 20
+```
+
+- `echo idle` (`--bulk-echo-text`, needs `--pane-cols`): N tokens typed into the left remote pane with the link quiet, 1-2 s apart. The baseline for the next row.
+- `echo under bulk`: the same, while the right remote pane runs an endless loop of colored random hex. Time is from keypress to the token on screen, so it includes any wait behind queued screen data. A line after the table gives bytes down and the average rate for the whole scenario. A sample that does not show up in `--timeout` (30 s) counts as TIMEOUT and costs 30 s, so a bad build makes the run long.
+- It is on only when `RATE_KBIT` is set. `echo in prefetch` stays the prefetch scenario; it does not use the bulk.
+- Combine `RATE_KBIT` with `lo_netem.sh` loss if needed. The proxy still enforces the cap.
+
+The bulk pane itself produces only ~1.8 Mbit/s (the render slot holds one frame, so output coalesces), so a cap above ~2 Mbit/s never queues anything. Pick a cap below that. Fork build `63ad9b47` on both ends, RTT 66 ms, N=20, medians with p90 and max in ms:
+
+| Cap | Echo idle | Echo under bulk | Bytes down in scenario |
+| --- | --- | --- | --- |
+| 8 Mbit/s | 71 (91, max 107) | 91 (112, max 129) | 7.5 MB, ~1.8 Mbit/s avg |
+| 2 Mbit/s | 71 (100, max 134) | 100 (109, max 126) | 7.6 MB, ~1.8 Mbit/s avg |
+| 1.5 Mbit/s | 70 (89, max 173) | 8344 (10942, max 10969) | 32.5 MB, 1.5 Mbit/s |
+| 1 Mbit/s | 75 (89, max 98) | 14275 (16679), 13 of 20 timed out | 63 MB, 1.0 Mbit/s |
+| 0.5 Mbit/s | 78 (90, max 97) | 18 of 20 timed out | 36 MB, 0.5 Mbit/s |
 
 ## Gotchas
 

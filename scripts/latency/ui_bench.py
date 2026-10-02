@@ -41,6 +41,18 @@ Clicks are SGR mouse events. Scenarios run only when configured:
                      remote pane. The timed part is the keypress to the token
                      on screen. The pane must be a shell prompt; the typed
                      line is cleared with ^U after each action.
+  echo under bulk    --bulk-echo-text TEXT with --pane-cols A,B (and the
+                     remote workspace current, or the workspace switch flags).
+                     Needs a bandwidth-capped link (rig.sh with RATE_KBIT),
+                     else bytes never pile up. First "echo idle": N times, click
+                     column A (a shell prompt), type TEXT+nonce+counter, time
+                     the keypress to the token on screen, wait 1-2 s. Then
+                     start an endless stream of colored random hex in the pane
+                     at column B, click column A again and repeat as "echo
+                     under bulk". Both rows stop at the first sight of the
+                     token ("settled" repeats "visible": a bulk pane never goes
+                     quiet). A line after the table gives the bytes down while
+                     the bulk ran. The bulk is stopped with ^C at the end.
 
 "visible" is when the chunk of pty output that made the condition true arrived,
 "settled" is the last pty output before 0.8 s of quiet, both in ms from the
@@ -60,6 +72,7 @@ import math
 import os
 import pty
 import queue
+import random
 import secrets
 import shlex
 import signal
@@ -244,9 +257,12 @@ class Client:
         while (left := end - time.monotonic()) > 0:
             self.pump(min(left, 0.1))
 
-    def measure(self, label, done, action, timeout, idle=0, setup=None):
+    def measure(self, label, done, action, timeout, idle=0, setup=None, busy=False):
+        """`busy`: the screen never goes quiet, so skip the settle before the action and stop
+        at the first hit instead of waiting for quiet after it."""
         self.idle(idle)
-        self.settle(0.5)
+        if not busy:
+            self.settle(0.5)
         # Untimed steps that must happen right before the action, so their output is not counted.
         if setup:
             setup()
@@ -260,6 +276,8 @@ class Client:
                 last = self.last_read
                 if hit is None and done(before):
                     hit = last
+                    if busy:
+                        break
             elif hit is not None and time.monotonic() - last > QUIET:
                 break
         sample = {"timeout": hit is None, "visible": None, "settled": None,
@@ -322,11 +340,12 @@ def print_table(results, traced):
 
 def run_scenarios(client, args):
     results = {}
+    extras = {}
     timeout = args.timeout
 
-    def record(name, done, action, setup=None):
+    def record(name, done, action, setup=None, busy=False):
         results.setdefault(name, []).append(
-            client.measure(name, done, action, timeout, args.idle, setup))
+            client.measure(name, done, action, timeout, 0 if busy else args.idle, setup, busy))
 
     if args.remote_ws:
         remote_xy = client.find(args.remote_ws)
@@ -393,7 +412,69 @@ def run_scenarios(client, args):
             client.type("\x15")
             client.settle(QUIET)
         client.resize(base_cols)
-    return results
+
+    if args.bulk_echo_text:
+        if args.remote_ws and not at_remote(None):
+            client.click(*remote_xy)
+            client.wait_until(lambda: at_remote(None), "switch to the remote workspace")
+            client.settle(QUIET)
+        extras["bulk"] = echo_under_bulk(client, args, record)
+    return results, extras
+
+
+# Colored, poorly compressible rows: random hex, a different color pair per row. The loop ends
+# with ^C, which zsh turns into leaving the loop.
+BULK_COMMAND = (
+    "while :; do od -An -tx1 -v /dev/urandom | paste -d ' ' - - | head -n 400 | "
+    + r"""awk '{printf "\033[38;5;%d;48;5;%dm%s\033[0m\n", 17 + NR % 200, 232 + NR % 24, $0}'; done"""
+)
+
+
+def echo_under_bulk(client, args, record):
+    type_x, bulk_x = args.pane_cols
+    y = client.rows // 2
+    nonce = secrets.token_hex(2)
+    counter = 0
+
+    def echo(name, busy):
+        nonlocal counter
+        counter += 1
+        token = f"{args.bulk_echo_text}{nonce}{counter}"
+        if token in client.text():
+            sys.exit(f"ui_bench: echo token {token!r} is already on screen\n{client.text()}")
+        record(name, lambda before: token in client.text(), lambda: client.type(token), busy=busy)
+        client.type("\x15")
+        client.idle(random.uniform(1, 2))
+
+    client.click(type_x, y)
+    client.settle(QUIET)
+    for _ in range(args.n):
+        echo("echo idle", False)
+
+    client.click(bulk_x, y)
+    client.settle(QUIET)
+    t_start = time.monotonic()
+    # \r, not \n: the client pty is in raw mode.
+    client.type(BULK_COMMAND + "\r")
+    b0 = client.nbytes
+    client.wait_until(lambda: client.nbytes - b0 > 20000, "bulk output")
+    client.click(type_x, y)
+    client.idle(1)
+    try:
+        for _ in range(args.n):
+            echo("echo under bulk", True)
+    finally:
+        t_end = time.monotonic()
+        client.click(bulk_x, y)
+        client.type("\x03")
+        client.settle(QUIET)
+        if time.monotonic() - client.last_read < QUIET:
+            print("  echo under bulk: the bulk pane still prints after ^C", file=sys.stderr, flush=True)
+        client.click(type_x, y)
+    out = {"seconds": t_end - t_start}
+    if client.trace_path:
+        out["up"], out["down"], _, _ = client.wire(t_start, t_end, t_end)
+    return out
 
 
 def parse_args():
@@ -416,6 +497,9 @@ def parse_args():
                    help="type TEXT+nonce+counter into the remote pane while the client prefetches tab screens")
     p.add_argument("--echo-delay", type=float, default=350, metavar="MS",
                    help="wait this long after the remote marker shows before typing (default 350)")
+    p.add_argument("--bulk-echo-text", metavar="TEXT",
+                   help="run the echo-under-bulk scenario: type TEXT+nonce+counter in the pane at the "
+                        "first --pane-cols column while the pane at the second prints endlessly")
     p.add_argument("-n", type=int, default=5, help="measured repetitions per scenario (default 5)")
     p.add_argument("--timeout", type=float, default=30, metavar="SEC", help="per action (default 30)")
     p.add_argument("--idle", type=float, default=0, metavar="SEC",
@@ -442,6 +526,8 @@ def parse_args():
             p.error("--pane-cols wants two integers like 60,150")
     if args.echo_text and not args.remote_ws:
         p.error("--echo-text needs the workspace switch flags")
+    if args.bulk_echo_text and not args.pane_cols:
+        p.error("--bulk-echo-text needs --pane-cols")
     if not args.remote_ws and not args.pane_cols and not args.scroll_col:
         p.error("configure a scenario: workspace switch flags, --pane-cols and/or --scroll-col")
     if args.trace and not os.path.isfile(args.trace):
@@ -458,7 +544,7 @@ def main():
         client.settle(1.5, 15)
         if args.wait_text:
             client.wait_for_text(args.wait_text, 60)
-        results = run_scenarios(client, args)
+        results, extras = run_scenarios(client, args)
     except ClientExited:
         sys.exit(f"ui_bench: client exited\n{client.text()}")
     finally:
@@ -467,13 +553,18 @@ def main():
     print(f"client: {label}\n{args.cols}x{args.rows}  n={args.n}  "
           f"times in ms from the click; bytes per action")
     print_table(results, bool(args.trace))
+    bulk = extras.get("bulk")
+    if bulk and "down" in bulk:
+        print(f"echo under bulk, whole scenario: {bulk['down'] / 1024:.0f} KB down and "
+              f"{bulk['up'] / 1024:.1f} KB up in {bulk['seconds']:.0f} s "
+              f"(avg {bulk['down'] * 8 / bulk['seconds'] / 1000:.0f} kbit/s down)")
     if args.json:
         with open(args.json, "w") as f:
             json.dump({
                 "label": label, "client": argv, "cols": args.cols, "rows": args.rows,
                 "n": args.n, "timeout_s": args.timeout, "traced": bool(args.trace),
                 "date": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "samples": results,
+                "samples": results, "extras": extras,
                 "summary": {name: summarize(s) for name, s in results.items()},
             }, f, indent=2)
     if any(s["timeout"] for samples in results.values() for s in samples):

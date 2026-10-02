@@ -28,6 +28,12 @@
 #                          and without spaces: herdr's unix sockets live under it
 #                          and macOS limits socket paths to 103 bytes.
 #        HRIG_JSON         also write ui_bench.py's raw samples to this file
+#        RATE_KBIT         cap the link at this many kbit/s in each direction (default:
+#                          no cap). The proxy then stops reading when its queue is full
+#                          (QUEUE_KB, default 128), so bytes pile up in the sender like
+#                          on a slow link, and `run` adds the "echo under bulk" scenario:
+#                          typing echo in one remote pane while another prints forever.
+#                          Works with lo_netem too (the proxy still enforces the cap).
 # Not supported: two rigs at once with the same ports or HRIG_DIR.
 set -uo pipefail
 
@@ -71,6 +77,17 @@ esac
 [ ${#HRIG_DIR} -le 60 ] || die "HRIG_DIR is too long for unix socket paths (max 60 bytes)"
 
 PYTHON=$(command -v python3) || die "python3 not found"
+
+RATE_KBIT=${RATE_KBIT:-}
+QUEUE_KB=${QUEUE_KB:-128}
+[ -z "$RATE_KBIT" ] || [[ $RATE_KBIT =~ ^[1-9][0-9]*$ ]] || die "RATE_KBIT must be a positive integer, got '$RATE_KBIT'"
+[[ $QUEUE_KB =~ ^[1-9][0-9]*$ ]] || die "QUEUE_KB must be a positive integer, got '$QUEUE_KB'"
+PROXY_RATE=()
+RATE_LABEL=
+if [ -n "$RATE_KBIT" ]; then
+    PROXY_RATE=(--rate-down "$RATE_KBIT" --rate-up "$RATE_KBIT" --queue-kb "$QUEUE_KB")
+    RATE_LABEL=", rate $RATE_KBIT kbit/s"
+fi
 
 NETEM_STATE=/tmp/herdr-latency-netem.state
 PROXY_RTT=$RTT
@@ -309,13 +326,15 @@ setup() {
     start_detached sshd "$HRIG_DIR/sshd_config" "$HRIG_DIR" "$RUN/sshd.log" \
         /usr/sbin/sshd -f "$HRIG_DIR/sshd_config" -D -p "$SSHD_PORT"
     start_detached proxy delay_proxy.py "$HRIG_DIR" "$RUN/proxy.log" \
-        "$PYTHON" "$HERE/delay_proxy.py" "$PROXY_PORT" "$SSHD_PORT" "$PROXY_RTT" "$RUN/trace.log"
+        "$PYTHON" "$HERE/delay_proxy.py" ${PROXY_RATE[@]+"${PROXY_RATE[@]}"} \
+        "$PROXY_PORT" "$SSHD_PORT" "$PROXY_RTT" "$RUN/trace.log"
     wait_for 5 nc -z 127.0.0.1 "$SSHD_PORT" || die "sshd did not start (see $RUN/sshd.log)"
     wait_for 5 nc -z 127.0.0.1 "$PROXY_PORT" || die "proxy did not start (see $RUN/proxy.log)"
     if [ -n "$SHAPING" ]; then
         shaped_path_check
     else
-        "$PYTHON" "$HERE/delay_proxy.py" --selftest "$RTT" || die "proxy selftest failed"
+        "$PYTHON" "$HERE/delay_proxy.py" ${PROXY_RATE[@]+"${PROXY_RATE[@]}"} --selftest "$RTT" \
+            || die "proxy selftest failed"
     fi
 
     # Remote side: a workspace with two panes side by side showing distinct
@@ -371,15 +390,18 @@ setup() {
 client_command() { echo env -i HOME="$CLIENT_HOME" PATH=$SAFE_PATH TERM=xterm-256color "$CLIENT_BIN"; }
 
 bench() {
-    local json=()
+    local json=() bulk=()
     [ -n "${HRIG_JSON:-}" ] && json=(--json "$HRIG_JSON")
+    # Without a cap bytes never pile up, so the bulk scenario would only repeat the plain echo.
+    [ -n "$RATE_KBIT" ] && bulk=(--bulk-echo-text BULK)
     # Background + wait, so the EXIT/TERM trap can run while it is going.
     "$HERE/ui_bench.py" -n "$N" \
         --remote-ws '· rigremote' --remote-marker LEFT-PANE-MARKER \
         --local-ws '· local' --local-marker LOCAL-PANE-MARKER \
         --pane-cols 60,150 --scroll-col 150 --echo-text ECHO \
+        ${bulk[@]+"${bulk[@]}"} \
         --trace "$RUN/trace.log" ${json[@]+"${json[@]}"} \
-        --label "RTT $RTT ms${LOSS_LABEL}, client $CLIENT_BIN, remote $HERDR_REMOTE_BIN" \
+        --label "RTT $RTT ms${LOSS_LABEL}${RATE_LABEL}, client $CLIENT_BIN, remote $HERDR_REMOTE_BIN" \
         -- $(client_command) &
     echo "$! ui_bench.py" >"$RUN/bench.pid"
     wait $!
@@ -410,6 +432,7 @@ detect_netem
 resolve_binaries
 echo "herdr latency rig: RTT $RTT ms, N=$N, state dir $HRIG_DIR"
 [ -n "$SHAPING" ] && echo "  $SHAPING"
+[ -n "$RATE_KBIT" ] && echo "  shaping: proxy rate cap $RATE_KBIT kbit/s each direction, queue $QUEUE_KB KB"
 echo "  client + local server: $(describe_binary "$CLIENT_BIN")"
 echo "  remote:                $(describe_binary "$HERDR_REMOTE_BIN")"
 echo "  repo HEAD:             $(git -C "$REPO" log -1 --format='%h %cd' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null)"
