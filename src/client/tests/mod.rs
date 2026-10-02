@@ -969,3 +969,36 @@ fn forward_clipboard_uses_local_clipboard_path() {
     assert!(forward_clipboard("dGVzdA=="));
     assert!(!forward_clipboard("not base64"));
 }
+
+#[test]
+fn only_surface_messages_outside_an_activation_join_a_held_back_frame() {
+    let server = |message| ClientLoopEvent::ServerMessage {
+        endpoint_id: endpoint::ClientEndpointId::Local,
+        generation: 1,
+        message: Box::new(message),
+    };
+    let surface = || server(ServerMessage::PaneSurface(shell::tests::surface()));
+    let patch = || {
+        server(ServerMessage::PaneSurfacePatch(
+            crate::protocol::PaneSurfacePatch {
+                boot_id: "boot-1".into(),
+                projection_revision: 1,
+                base_surface_revision: 1,
+                surface_revision: 2,
+                rows: Vec::new(),
+                panes: Vec::new(),
+                cursor: None,
+            },
+        ))
+    };
+
+    assert!(continues_surface_batch(&surface(), false));
+    assert!(continues_surface_batch(&patch(), false));
+    assert!(!continues_surface_batch(&surface(), true));
+    assert!(!continues_surface_batch(&patch(), true));
+    assert!(!continues_surface_batch(
+        &server(ServerMessage::TerminalBell { count: 1 }),
+        false
+    ));
+    assert!(!continues_surface_batch(&ClientLoopEvent::Timer, false));
+}

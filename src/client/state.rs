@@ -29,6 +29,18 @@ impl RetiredDirectGraphics {
     }
 }
 
+/// Most surface updates one batch may hold back before it presents, so a flood of output still
+/// reaches the screen at a steady rate.
+pub(super) const MAX_DEFERRED_SURFACE_UPDATES: usize = 64;
+
+/// Pane surface updates applied to the shell but not yet written to the terminal.
+pub(super) enum DeferredSurfacePresentation {
+    /// One retained patch, which can still take the fast patch path.
+    Patch(shell::ClientComposedSurfacePatch),
+    /// Anything else needs one composed frame of the current shell state.
+    Compose,
+}
+
 /// State tracking for the thin client.
 pub(super) struct ClientState {
     /// Stateful semantic-frame encoder used when the server sends FrameData.
@@ -78,6 +90,8 @@ pub(super) struct ClientState {
     /// Presentation effects a committed handoff held back, handled ahead of any new event so
     /// they apply right after the frame they describe.
     pub(super) committed_effects: std::collections::VecDeque<ClientLoopEvent>,
+    pub(super) deferred_surface: Option<DeferredSurfacePresentation>,
+    pub(super) deferred_surface_updates: usize,
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,
@@ -148,6 +162,8 @@ impl ClientState {
             presentation_frozen: false,
             deferred_local_activation: None,
             committed_effects: Default::default(),
+            deferred_surface: None,
+            deferred_surface_updates: 0,
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
             shell: Some(shell::ClientShellState::new(
@@ -332,8 +348,68 @@ impl ClientState {
         let _ = stdout.flush();
     }
 
-    pub(super) fn present_surface_patch(
+    /// Records a pane surface update the shell already holds. The caller presents it with
+    /// `present_deferred_surface` once no further surface update is waiting.
+    pub(super) fn defer_surface_presentation(
         &mut self,
+        patch: Option<shell::ClientComposedSurfacePatch>,
+    ) {
+        self.deferred_surface = Some(match (self.deferred_surface.is_none(), patch) {
+            (true, Some(patch)) => DeferredSurfacePresentation::Patch(patch),
+            _ => DeferredSurfacePresentation::Compose,
+        });
+        self.deferred_surface_updates += 1;
+    }
+
+    pub(super) fn surface_presentation_deferred(&self) -> bool {
+        self.deferred_surface.is_some()
+    }
+
+    pub(super) fn deferred_surface_batch_full(&self) -> bool {
+        self.deferred_surface_updates >= MAX_DEFERRED_SURFACE_UPDATES
+    }
+
+    pub(super) fn present_deferred_surface(&mut self) {
+        self.present_deferred_surface_to(&mut io::stdout());
+    }
+
+    fn present_deferred_surface_to(&mut self, writer: &mut impl io::Write) {
+        let Some(deferred) = self.deferred_surface.take() else {
+            return;
+        };
+        crate::render_prof::counter(
+            "client_surface_batch.updates",
+            std::mem::take(&mut self.deferred_surface_updates) as u64,
+        );
+        let compose = match deferred {
+            DeferredSurfacePresentation::Patch(patch) => {
+                match self.present_surface_patch_to(writer, patch) {
+                    Ok(presented) => !presented,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to present retained pane surface patch");
+                        self.request_repaint();
+                        false
+                    }
+                }
+            }
+            DeferredSurfacePresentation::Compose => true,
+        };
+        if !compose {
+            return;
+        }
+        let size = self.reported_size;
+        if let Some(frame) = self
+            .shell
+            .as_mut()
+            .and_then(|shell| shell.compose(size.0, size.1))
+        {
+            self.try_present_frame_to(writer, frame);
+        }
+    }
+
+    fn present_surface_patch_to(
+        &mut self,
+        writer: &mut impl io::Write,
         patch: shell::ClientComposedSurfacePatch,
     ) -> io::Result<bool> {
         if self.presentation_frozen
@@ -366,9 +442,8 @@ impl ClientState {
         crate::render_prof::duration_since("client_surface_patch.encode", encode_started);
         let write_started = crate::render_prof::timer();
         if !encoded.bytes.is_empty() {
-            let mut stdout = io::stdout();
-            stdout.write_all(&encoded.bytes)?;
-            stdout.flush()?;
+            writer.write_all(&encoded.bytes)?;
+            writer.flush()?;
         }
         crate::render_prof::duration_since("client_surface_patch.write", write_started);
         let committed = self.blit_encoder.commit_patch(&rows, patch.cursor, encoded);
@@ -560,6 +635,14 @@ impl ClientState {
         &mut self,
         frame_data: impl Into<frame_output::ComposedFrame>,
     ) -> bool {
+        self.try_present_frame_to(&mut io::stdout(), frame_data)
+    }
+
+    fn try_present_frame_to(
+        &mut self,
+        writer: &mut impl io::Write,
+        frame_data: impl Into<frame_output::ComposedFrame>,
+    ) -> bool {
         if self.presentation_frozen {
             return false;
         }
@@ -578,8 +661,7 @@ impl ClientState {
         } else {
             self.blit_encoder.encode(&frame_data, self.repaint_pending)
         };
-        let mut stdout = io::stdout();
-        if let Err(error) = self.write_composed_output(&mut stdout, &encoded.bytes, graphics) {
+        if let Err(error) = self.write_composed_output(writer, &encoded.bytes, graphics) {
             tracing::warn!(%error, "failed to present client frame");
             self.repaint_pending = true;
             return false;
@@ -587,6 +669,177 @@ impl ClientState {
         self.blit_encoder.commit(frame_data, encoded);
         self.repaint_pending = false;
         true
+    }
+}
+
+#[cfg(test)]
+mod surface_batch_tests {
+    use super::*;
+    use crate::client::shell::tests::{snapshot, surface};
+
+    /// Terminal stand-in. Every present ends in one flush, so flushes count frames.
+    #[derive(Default)]
+    struct Terminal {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl io::Write for Terminal {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    impl Terminal {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.bytes).into_owned()
+        }
+    }
+
+    fn presented_state() -> ClientState {
+        let mut state = ClientState::test_new();
+        let shell = state.shell.as_mut().expect("test shell");
+        shell.set_snapshot(Box::new(snapshot()));
+        shell.set_pane_surface(surface());
+        state.defer_surface_presentation(None);
+        let mut terminal = Terminal::default();
+        state.present_deferred_surface_to(&mut terminal);
+        assert_eq!(terminal.flushes, 1, "the first surface is presented");
+        state
+    }
+
+    fn patch(base_surface_revision: u64, symbol: &str) -> crate::protocol::PaneSurfacePatch {
+        crate::protocol::PaneSurfacePatch {
+            boot_id: "boot-1".into(),
+            projection_revision: 1,
+            base_surface_revision,
+            surface_revision: base_surface_revision + 1,
+            rows: vec![crate::protocol::PaneSurfacePatchRow {
+                x: 0,
+                y: 0,
+                cells: vec![
+                    crate::protocol::CellData {
+                        symbol: symbol.into(),
+                        fg: 0,
+                        bg: 0,
+                        modifier: 0,
+                        skip: false,
+                        hyperlink: None,
+                    };
+                    4
+                ],
+            }],
+            panes: surface().panes,
+            cursor: None,
+        }
+    }
+
+    fn apply(state: &mut ClientState, patch: crate::protocol::PaneSurfacePatch) {
+        let shell = state.shell.as_mut().expect("test shell");
+        let shell::ClientPaneSurfacePatchOutcome::Applied(composed) =
+            shell.apply_pane_surface_patch(patch)
+        else {
+            panic!("patch applies to the presented surface");
+        };
+        state.defer_surface_presentation(composed);
+    }
+
+    #[test]
+    fn queued_surface_patches_present_as_one_terminal_write() {
+        let mut state = presented_state();
+        for (base, symbol) in [(1, "α"), (2, "β"), (3, "γ")] {
+            apply(&mut state, patch(base, symbol));
+        }
+        assert!(matches!(
+            state.deferred_surface,
+            Some(DeferredSurfacePresentation::Compose)
+        ));
+
+        let mut terminal = Terminal::default();
+        state.present_deferred_surface_to(&mut terminal);
+
+        assert_eq!(terminal.flushes, 1);
+        let text = terminal.text();
+        assert!(text.contains('γ'), "the latest cells reach the terminal");
+        assert!(
+            !text.contains('α') && !text.contains('β'),
+            "superseded cells are never written: {text:?}"
+        );
+        assert!(!state.surface_presentation_deferred());
+        assert_eq!(state.deferred_surface_updates, 0);
+
+        let mut later = Terminal::default();
+        state.present_deferred_surface_to(&mut later);
+        assert_eq!(later.flushes, 0, "a presented batch is not written twice");
+    }
+
+    #[test]
+    fn a_single_surface_patch_keeps_the_fast_patch_output() {
+        let mut batched = presented_state();
+        let mut direct = presented_state();
+
+        apply(&mut batched, patch(1, "α"));
+        assert!(matches!(
+            batched.deferred_surface,
+            Some(DeferredSurfacePresentation::Patch(_))
+        ));
+        let mut batched_terminal = Terminal::default();
+        batched.present_deferred_surface_to(&mut batched_terminal);
+
+        let shell::ClientPaneSurfacePatchOutcome::Applied(Some(composed)) = direct
+            .shell
+            .as_mut()
+            .expect("test shell")
+            .apply_pane_surface_patch(patch(1, "α"))
+        else {
+            panic!("fast retained patch");
+        };
+        let mut direct_terminal = Terminal::default();
+        assert!(direct
+            .present_surface_patch_to(&mut direct_terminal, composed)
+            .expect("patch written"));
+
+        assert_eq!(batched_terminal.flushes, 1);
+        assert_eq!(batched_terminal.bytes, direct_terminal.bytes);
+    }
+
+    #[test]
+    fn a_complete_surface_and_its_patches_present_as_one_composed_frame() {
+        let mut state = presented_state();
+        let mut replacement = surface();
+        replacement.surface_revision = 5;
+        state
+            .shell
+            .as_mut()
+            .expect("test shell")
+            .set_pane_surface(replacement);
+        state.defer_surface_presentation(None);
+        apply(&mut state, patch(5, "δ"));
+
+        let mut terminal = Terminal::default();
+        state.present_deferred_surface_to(&mut terminal);
+
+        assert_eq!(terminal.flushes, 1);
+        assert!(terminal.text().contains('δ'));
+    }
+
+    #[test]
+    fn a_full_batch_asks_to_present() {
+        let mut state = presented_state();
+        for base in 1..MAX_DEFERRED_SURFACE_UPDATES as u64 {
+            apply(&mut state, patch(base, "α"));
+            assert!(!state.deferred_surface_batch_full());
+        }
+        apply(&mut state, patch(MAX_DEFERRED_SURFACE_UPDATES as u64, "β"));
+        assert!(state.deferred_surface_batch_full());
+        state.present_deferred_surface_to(&mut Terminal::default());
+        assert!(!state.deferred_surface_batch_full());
     }
 }
 

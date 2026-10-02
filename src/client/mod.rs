@@ -408,6 +408,22 @@ fn graphics_owner_is_active(
             .is_some_and(|shell| shell.endpoint_is_active(owner))
 }
 
+/// Whether handling `event` may wait for the held-back surface frame. Outside an endpoint
+/// activation, a pane surface message only updates the active shell or a background cache and
+/// writes nothing itself, so terminal output keeps its order. Activation surfaces can commit and
+/// present a handoff frame, which must not follow a held-back frame of the source.
+fn continues_surface_batch(event: &ClientLoopEvent, activation_pending: bool) -> bool {
+    !activation_pending
+        && matches!(
+            event,
+            ClientLoopEvent::ServerMessage { message, .. }
+                if matches!(
+                    message.as_ref(),
+                    ServerMessage::PaneSurface(_) | ServerMessage::PaneSurfacePatch(_)
+                )
+        )
+}
+
 /// The main client event loop.
 ///
 /// Uses a threaded architecture:
@@ -470,6 +486,8 @@ async fn run_client_loop(
         presentation_frozen: false,
         deferred_local_activation: None,
         committed_effects: Default::default(),
+        deferred_surface: None,
+        deferred_surface_updates: 0,
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
@@ -777,6 +795,40 @@ async fn run_client_loop(
             .committed_effects
             .pop_front()
             .or_else(|| scheduled_activation.take());
+        // Surface updates that are already queued join the held-back frame, so a burst costs one
+        // terminal write. Anything else, an empty queue, or a full batch presents it first.
+        let immediate_event = if immediate_event.is_none()
+            && state.surface_presentation_deferred()
+            && !state.deferred_surface_batch_full()
+        {
+            #[cfg(windows)]
+            let queued = stdin_rx
+                .try_recv()
+                .ok()
+                .or_else(|| {
+                    supervisor_rx
+                        .try_recv()
+                        .ok()
+                        .map(ClientLoopEvent::EndpointSupervisor)
+                })
+                .or_else(|| event_rx.try_recv().ok());
+            #[cfg(unix)]
+            let queued = supervisor_rx
+                .try_recv()
+                .ok()
+                .map(ClientLoopEvent::EndpointSupervisor)
+                .or_else(|| event_rx.try_recv().ok());
+            queued
+        } else {
+            immediate_event
+        };
+        if state.deferred_surface_batch_full()
+            || immediate_event
+                .as_ref()
+                .is_none_or(|event| !continues_surface_batch(event, pending_activation.is_some()))
+        {
+            state.present_deferred_surface();
+        }
         #[cfg(windows)]
         let event = if let Some(event) = immediate_event {
             event
@@ -1499,19 +1551,14 @@ async fn run_client_loop(
                         if !endpoint_active {
                             continue;
                         }
-                        let composed = if let Some(shell) = &mut state.shell {
+                        if let Some(shell) = &mut state.shell {
                             shell.set_pane_surface(surface);
-                            shell.compose(state.reported_size.0, state.reported_size.1)
-                        } else {
-                            None
-                        };
+                            state.defer_surface_presentation(None);
+                        }
                         apply_client_shell_input_source_changes(
                             &mut state,
                             &mut prefix_input_source,
                         );
-                        if let Some(frame) = composed {
-                            state.present_frame(frame);
-                        }
                     }
                     ServerMessage::PaneSurfacePatch(patch) => {
                         if activation_message
@@ -1534,18 +1581,10 @@ async fn run_client_loop(
                             "client_surface_patch.apply",
                             apply_started,
                         );
-                        let compose_fallback = match outcome {
-                            Some(shell::ClientPaneSurfacePatchOutcome::Applied(Some(patch))) => {
-                                match state.present_surface_patch(patch) {
-                                    Ok(presented) => !presented,
-                                    Err(error) => {
-                                        warn!(%error, "failed to present retained pane surface patch");
-                                        state.request_repaint();
-                                        false
-                                    }
-                                }
+                        match outcome {
+                            Some(shell::ClientPaneSurfacePatchOutcome::Applied(patch)) => {
+                                state.defer_surface_presentation(patch);
                             }
-                            Some(shell::ClientPaneSurfacePatchOutcome::Applied(None)) => true,
                             Some(shell::ClientPaneSurfacePatchOutcome::Diverged) => {
                                 if write_stream.request_surface_resync(&endpoint_id) {
                                     warn!(
@@ -1553,22 +1592,13 @@ async fn run_client_loop(
                                         "pane surface patch diverged from the presented surface; requested a complete surface"
                                     );
                                 }
-                                false
                             }
-                            Some(shell::ClientPaneSurfacePatchOutcome::Rejected) | None => false,
-                        };
+                            Some(shell::ClientPaneSurfacePatchOutcome::Rejected) | None => {}
+                        }
                         apply_client_shell_input_source_changes(
                             &mut state,
                             &mut prefix_input_source,
                         );
-                        if compose_fallback {
-                            let composed = state.shell.as_mut().and_then(|shell| {
-                                shell.compose(state.reported_size.0, state.reported_size.1)
-                            });
-                            if let Some(frame) = composed {
-                                state.present_frame(frame);
-                            }
-                        }
                         crate::render_prof::duration_since(
                             "client_surface_patch.total",
                             patch_started,

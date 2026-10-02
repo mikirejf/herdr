@@ -7,7 +7,7 @@ use crate::protocol::{
 use crossterm::event::MouseEvent;
 mod text_editing;
 
-pub(super) fn snapshot() -> ClientShellSnapshot {
+pub(in crate::client) fn snapshot() -> ClientShellSnapshot {
     ClientShellSnapshot {
         boot_id: "boot-1".into(),
         revision: 1,
@@ -89,7 +89,7 @@ fn worktree_list_result(open_workspace_id: Option<&str>) -> crate::api::schema::
     }
 }
 
-fn surface() -> PaneSurfaceFrame {
+pub(in crate::client) fn surface() -> PaneSurfaceFrame {
     let surface_buffer = Buffer::with_lines(["LIVE", "PANE"]);
     PaneSurfaceFrame {
         boot_id: "boot-1".into(),
