@@ -71,7 +71,7 @@ impl ClientShellState {
     }
 
     pub(super) fn focused_navigation_target(&self) -> Option<WorkspaceNavigationTarget> {
-        let workspace_id = self.snapshot.as_deref()?.focused_workspace_id.as_deref()?;
+        let workspace_id = self.effective_focused_workspace_id()?;
         self.navigation_target(&self.active_endpoint_id, workspace_id)
     }
 

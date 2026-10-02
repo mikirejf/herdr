@@ -675,6 +675,196 @@ fn deadline_reports_the_end_of_the_input_quiet_period() {
     assert_eq!(state.tab_screen_request_deadline(start + ms(1500)), None);
 }
 
+fn recorded_methods(outcome: &ClientShellInput) -> Vec<&crate::api::schema::Method> {
+    outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => Some(&request.method),
+            _ => None,
+        })
+        .collect()
+}
+
+fn record(state: &mut ClientShellState, action: crate::input::KeybindAction) -> ClientShellInput {
+    let mut outcome = ClientShellInput::default();
+    state.record_binding(crate::input::KeybindMatch::Action(action), &mut outcome);
+    outcome
+}
+
+#[test]
+fn close_tab_during_a_preview_names_the_shown_tab() {
+    let mut state = visited(&["tab_3", "tab_1"]);
+    request(&mut state, ClientEndpointFocusTarget::Tab("tab_3".into()));
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_3"));
+
+    let closed = record(&mut state, crate::input::KeybindAction::CloseTab);
+
+    assert!(matches!(
+        recorded_methods(&closed).as_slice(),
+        [crate::api::schema::Method::TabClose(target)] if target.tab_id == "tab_3"
+    ));
+}
+
+#[test]
+fn rename_and_new_tab_during_a_preview_target_the_shown_tab() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    focus_workspace(&mut state, "ws_2");
+
+    state.open_rename_tab_overlay();
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            target: ClientRenameTarget::Tab { tab_id, .. },
+            ..
+        })) if tab_id == "tab_2"
+    ));
+    state.overlay = None;
+
+    state.open_new_tab_overlay();
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            target: ClientRenameTarget::NewTab { workspace_id, .. },
+            ..
+        })) if workspace_id == "ws_2"
+    ));
+    state.overlay = None;
+
+    state.config.prompt_new_tab_name = false;
+    let created = record(&mut state, crate::input::KeybindAction::NewTab);
+    assert!(matches!(
+        recorded_methods(&created).as_slice(),
+        [crate::api::schema::Method::TabCreate(params)]
+            if params.workspace_id.as_deref() == Some("ws_2")
+    ));
+}
+
+#[test]
+fn relative_tab_navigation_during_a_preview_starts_from_the_shown_tab() {
+    let mut state = visited(&["tab_3", "tab_1"]);
+    request(&mut state, ClientEndpointFocusTarget::Tab("tab_3".into()));
+
+    let next = record(&mut state, crate::input::KeybindAction::NextTab);
+
+    assert!(matches!(
+        recorded_methods(&next).as_slice(),
+        [crate::api::schema::Method::TabFocus(target)] if target.tab_id == "tab_1"
+    ));
+}
+
+/// `tab_3` holds a second pane, `pane_3b`, to the right of `pane_3`, both in the snapshot and in
+/// the screen the client remembers for it.
+fn with_second_pane_in_tab_3(state: &mut ClientShellState) {
+    let mut projected = tabs_snapshot("tab_1", 2);
+    projected.panes.push(second_pane(&projected));
+    state.set_snapshot(Box::new(projected));
+    let surface = state
+        .remembered_tab_screens
+        .get_mut(&(ClientEndpointId::Local, "tab_3".into()))
+        .expect("remembered tab_3");
+    let mut right = surface.panes[0].clone();
+    right.pane_id = "pane_3b".into();
+    right.focused = false;
+    let half = surface.panes[0].rect.width / 2;
+    surface.panes[0].rect.width = half;
+    surface.panes[0].inner_rect.width = half;
+    right.rect.x = half;
+    right.rect.width = half;
+    right.inner_rect.x = half;
+    right.inner_rect.width = half;
+    surface.panes.push(right);
+}
+
+fn second_pane(projected: &ClientShellSnapshot) -> ClientShellPane {
+    ClientShellPane {
+        pane_id: "pane_3b".into(),
+        focused: false,
+        ..projected
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "pane_3")
+            .cloned()
+            .expect("pane_3")
+    }
+}
+
+fn previewing_two_pane_tab_3() -> ClientShellState {
+    let mut state = visited(&["tab_3", "tab_1"]);
+    with_second_pane_in_tab_3(&mut state);
+    request(&mut state, ClientEndpointFocusTarget::Tab("tab_3".into()));
+    assert!(state.previewed_tab.is_some());
+    state
+}
+
+#[test]
+fn focusing_a_pane_of_the_previewed_tab_keeps_the_preview_and_retargets_keys() {
+    let mut state = previewing_two_pane_tab_3();
+
+    request(
+        &mut state,
+        ClientEndpointFocusTarget::Pane("pane_3b".into()),
+    );
+
+    assert!(state.previewed_tab.is_some());
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_3"));
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+    assert_eq!(
+        state
+            .previewed_tab
+            .as_ref()
+            .and_then(|preview| preview.snapshot.focused_pane_id.as_deref()),
+        Some("pane_3b")
+    );
+
+    let mut confirmed = tabs_snapshot("tab_3", 3);
+    confirmed.panes.push(second_pane(&confirmed));
+    confirmed.focused_pane_id = Some("pane_3b".into());
+    state.set_snapshot(Box::new(confirmed));
+    assert!(
+        state.previewed_tab.is_some(),
+        "the surface is still missing"
+    );
+    state.set_pane_surface(tab_surface(COLS, ROWS, "tab_3", 3));
+
+    assert!(state.previewed_tab.is_none());
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+}
+
+#[test]
+fn directional_focus_in_the_previewed_tab_keeps_the_preview() {
+    use crate::api::schema::{Method, PaneDirection, PaneFocusDirectionParams};
+
+    let focus = |state: &mut ClientShellState, direction| {
+        let mut outcome = ClientShellInput::default();
+        state.push_endpoint_method(
+            Method::PaneFocusDirection(PaneFocusDirectionParams {
+                pane_id: None,
+                direction,
+            }),
+            &mut outcome,
+        );
+    };
+    let mut state = previewing_two_pane_tab_3();
+
+    focus(&mut state, PaneDirection::Left);
+    assert!(state.previewed_tab.is_some());
+    assert_eq!(typed_pane(&mut state), "pane_3", "nothing lies to the left");
+
+    focus(&mut state, PaneDirection::Right);
+    assert!(state.previewed_tab.is_some());
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+}
+
+#[test]
+fn focusing_a_pane_outside_the_previewed_tab_drops_the_preview() {
+    let mut state = previewing_two_pane_tab_3();
+
+    request(&mut state, ClientEndpointFocusTarget::Pane("pane_2".into()));
+
+    assert!(state.previewed_tab.is_none());
+    assert_eq!(typed_pane(&mut state), "pane_1");
+}
 
 /// Feeds `input` to a state that has asked for no tab screen yet, then returns whether the next
 /// request is still held back once the surface size has settled.
@@ -740,3 +930,96 @@ fn host_replies_and_focus_reports_do_not_hold_back_prefetch() {
     }
 }
 
+fn reject(state: &mut ClientShellState, request_id: &str) {
+    state.handle_endpoint_result(
+        "boot-1",
+        request_id,
+        Err(ClientShellEndpointError {
+            code: Some("rejected".into()),
+            message: "no".into(),
+        }),
+    );
+}
+
+/// The endpoint presents `tab_3` at `revision` with `focused_pane` focused.
+fn present_tab_3(state: &mut ClientShellState, revision: u64, focused_pane: &str) {
+    let mut projected = tabs_snapshot("tab_3", revision);
+    projected.panes.push(second_pane(&projected));
+    projected.focused_pane_id = Some(focused_pane.into());
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(tab_surface(COLS, ROWS, "tab_3", revision));
+}
+
+#[test]
+fn tab_confirmation_before_the_pane_focus_reply_keeps_the_retargeted_pane() {
+    let mut state = previewing_two_pane_tab_3();
+    let pane_focus = request(
+        &mut state,
+        ClientEndpointFocusTarget::Pane("pane_3b".into()),
+    );
+
+    present_tab_3(&mut state, 3, "pane_3");
+
+    assert!(state.previewed_tab.is_none(), "the tab is confirmed");
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+
+    present_tab_3(&mut state, 4, "pane_3b");
+    settle(&mut state, &pane_focus);
+
+    assert!(state.predicted_pane_focus.is_none());
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+}
+
+#[test]
+fn a_focus_move_with_no_neighbor_keeps_the_pending_retarget() {
+    use crate::api::schema::{Method, PaneDirection, PaneFocusDirectionParams};
+
+    let mut state = previewing_two_pane_tab_3();
+    request(
+        &mut state,
+        ClientEndpointFocusTarget::Pane("pane_3b".into()),
+    );
+    let mut outcome = ClientShellInput::default();
+    state.push_endpoint_method(
+        Method::PaneFocusDirection(PaneFocusDirectionParams {
+            pane_id: None,
+            direction: PaneDirection::Right,
+        }),
+        &mut outcome,
+    );
+
+    present_tab_3(&mut state, 3, "pane_3");
+
+    assert!(state.previewed_tab.is_none(), "the tab is confirmed");
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+}
+
+#[test]
+fn rejected_pane_focus_after_tab_confirmation_falls_back_to_the_snapshot() {
+    let mut state = previewing_two_pane_tab_3();
+    let pane_focus = request(
+        &mut state,
+        ClientEndpointFocusTarget::Pane("pane_3b".into()),
+    );
+    present_tab_3(&mut state, 3, "pane_3");
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+
+    reject(&mut state, &pane_focus);
+
+    assert!(state.predicted_pane_focus.is_none());
+    assert_eq!(typed_pane(&mut state), "pane_3");
+}
+
+#[test]
+fn rejected_pane_focus_during_a_preview_drops_the_preview() {
+    let mut state = previewing_two_pane_tab_3();
+    let pane_focus = request(
+        &mut state,
+        ClientEndpointFocusTarget::Pane("pane_3b".into()),
+    );
+
+    reject(&mut state, &pane_focus);
+
+    assert!(state.previewed_tab.is_none());
+    assert!(state.predicted_pane_focus.is_none());
+}

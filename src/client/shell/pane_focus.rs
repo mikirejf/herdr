@@ -9,6 +9,33 @@ pub(super) struct PredictedPaneFocus {
     pub(super) request_id: String,
 }
 
+/// The pane the endpoint's directional focus picks from `source` on `surface`, or `None` when
+/// `source` is not on it.
+pub(super) fn pane_in_direction(
+    surface: &PaneSurfaceFrame,
+    source: &str,
+    direction: crate::api::schema::PaneDirection,
+) -> Option<Option<String>> {
+    let panes = &surface.panes;
+    let infos = panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| crate::layout::PaneInfo {
+            id: crate::layout::PaneId::from_raw(u32::try_from(index).unwrap_or(u32::MAX)),
+            rect: Rect::new(pane.rect.x, pane.rect.y, pane.rect.width, pane.rect.height),
+            inner_rect: Rect::default(),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
+            is_focused: pane.pane_id == source,
+        })
+        .collect::<Vec<_>>();
+    let source = infos.iter().find(|info| info.is_focused)?;
+    Some(
+        crate::layout::find_in_direction(source, direction.into(), &infos)
+            .map(|id| panes[id.raw() as usize].pane_id.clone()),
+    )
+}
+
 impl ClientShellState {
     /// The pane that receives keys and pane-targeted actions: the predicted pane while a focus
     /// change is in flight, then the previewed tab's pane, otherwise the endpoint's focused pane.
@@ -60,24 +87,7 @@ impl ClientShellState {
         if !self.can_predict_pane_focus(source) {
             return None;
         }
-        let panes = &self.pane_surface.as_ref()?.panes;
-        let infos = panes
-            .iter()
-            .enumerate()
-            .map(|(index, pane)| crate::layout::PaneInfo {
-                id: crate::layout::PaneId::from_raw(u32::try_from(index).unwrap_or(u32::MAX)),
-                rect: Rect::new(pane.rect.x, pane.rect.y, pane.rect.width, pane.rect.height),
-                inner_rect: Rect::default(),
-                scrollbar_rect: None,
-                borders: ratatui::widgets::Borders::NONE,
-                is_focused: pane.pane_id == source,
-            })
-            .collect::<Vec<_>>();
-        let source = infos.iter().find(|info| info.is_focused)?;
-        Some(
-            crate::layout::find_in_direction(source, direction.into(), &infos)
-                .map(|id| panes[id.raw() as usize].pane_id.clone()),
-        )
+        pane_in_direction(self.pane_surface.as_ref()?, source, direction)
     }
 
     /// Returns whether the presented focus changed.

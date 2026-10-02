@@ -125,11 +125,7 @@ impl ClientShellState {
                     return;
                 }
                 if action == crate::input::KeybindAction::CloseTab {
-                    if let Some(tab_id) = self
-                        .snapshot
-                        .as_deref()
-                        .and_then(|snapshot| snapshot.focused_tab_id.clone())
-                    {
+                    if let Some(tab_id) = self.effective_focused_tab_id().map(str::to_owned) {
                         self.request_tab_close(tab_id, outcome);
                     }
                     return;
@@ -210,16 +206,16 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 };
-                let Some(snapshot) = self.snapshot.as_deref() else {
+                if self.snapshot.is_none() {
                     return;
-                };
+                }
                 let selection = (action == crate::protocol::ClientShellCommandAction::PluginAction)
                     .then(|| {
                         let selection = self.selection.as_ref()?;
                         if !selection.is_visible() {
                             return None;
                         }
-                        if snapshot.focused_pane_id.as_deref() != Some(selection.pane_id.as_str()) {
+                        if self.focused_pane_id().as_deref() != Some(selection.pane_id.as_str()) {
                             return None;
                         }
                         let content_revision = self
@@ -246,9 +242,9 @@ impl ClientShellState {
                     .flatten();
                 let params = crate::api::schema::CommandInvokeParams {
                     command_id,
-                    workspace_id: snapshot.focused_workspace_id.clone(),
-                    tab_id: snapshot.focused_tab_id.clone(),
-                    pane_id: snapshot.focused_pane_id.clone(),
+                    workspace_id: self.effective_focused_workspace_id().map(str::to_owned),
+                    tab_id: self.effective_focused_tab_id().map(str::to_owned),
+                    pane_id: self.focused_pane_id(),
                     selection,
                 };
                 if action == crate::protocol::ClientShellCommandAction::Popup {
@@ -392,15 +388,22 @@ impl ClientShellState {
             crate::api::schema::Method::TabFocus(target) => Some(target.tab_id.clone()),
             _ => None,
         };
+        // A pane focus inside the previewed tab keeps showing the tab until its endpoint
+        // confirms it; dropping the preview would show the old tab again.
+        let retargeted_pane = self.previewed_pane_target(&method);
         if changes_focus {
             outcome.repaint |= self.pending_workspace_highlight.take().is_some();
-            if predicted_pane.is_none() {
+            // A request that leaves the previewed tab's shown pane unchanged must keep the
+            // pending retarget prediction, or confirming the tab would move keys back.
+            if predicted_pane.is_none() && !matches!(retargeted_pane, Some(None)) {
                 outcome.repaint |= self.predicted_pane_focus.take().is_some();
             }
             if previewed_tab.is_some() {
                 self.remember_focused_tab_screen();
             }
-            outcome.repaint |= self.previewed_tab.take().is_some();
+            if retargeted_pane.is_none() {
+                outcome.repaint |= self.previewed_tab.take().is_some();
+            }
         }
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             let label = self.active_endpoint_label().to_owned();
@@ -459,6 +462,8 @@ impl ClientShellState {
             outcome.repaint |= self.predict_pane_focus(pane_id, request_id);
         } else if let Some(tab_id) = previewed_tab {
             outcome.repaint |= self.start_tab_preview(&tab_id, request_id);
+        } else if let Some(Some(pane_id)) = retargeted_pane {
+            outcome.repaint |= self.retarget_tab_preview(pane_id, request_id);
         }
         true
     }
@@ -569,6 +574,10 @@ impl ClientShellState {
             });
             if result.is_err() || confirmed {
                 self.predicted_pane_focus = None;
+            }
+            // A preview still showing the rejected pane has nothing left to retarget to.
+            if result.is_err() {
+                self.previewed_tab = None;
             }
         }
         if let Err(error) = &result {
@@ -913,8 +922,8 @@ impl ClientShellState {
         use crate::input::KeybindAction;
 
         let snapshot = self.snapshot.as_deref()?;
-        let focused_workspace = snapshot.focused_workspace_id.clone()?;
-        let focused_tab = snapshot.focused_tab_id.clone();
+        let focused_workspace = self.effective_focused_workspace_id()?.to_owned();
+        let focused_tab = self.effective_focused_tab_id().map(str::to_owned);
         let focused_pane = self.focused_pane_id();
         let direction = |action| match action {
             KeybindAction::FocusPaneLeft

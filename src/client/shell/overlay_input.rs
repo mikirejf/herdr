@@ -323,11 +323,7 @@ impl ClientShellState {
                     && self.navigation_target_valid(target)
             })
             .map(|target| target.workspace_id.clone())
-            .or_else(|| {
-                self.snapshot
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.focused_workspace_id.clone())
-            })
+            .or_else(|| self.effective_focused_workspace_id().map(str::to_owned))
     }
 
     pub(super) fn open_new_workspace_overlay(&mut self) {
@@ -381,7 +377,7 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
-        let Some(workspace_id) = snapshot.focused_workspace_id.clone() else {
+        let Some(workspace_id) = self.effective_focused_workspace_id().map(str::to_owned) else {
             return;
         };
         let default_name = (snapshot
@@ -405,7 +401,7 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
-        let Some(tab_id) = snapshot.focused_tab_id.as_deref() else {
+        let Some(tab_id) = self.effective_focused_tab_id() else {
             return;
         };
         let Some(tab) = snapshot.tabs.iter().find(|tab| tab.tab_id == tab_id) else {
@@ -426,7 +422,7 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
-        let Some(pane_id) = snapshot.focused_pane_id.as_deref() else {
+        let Some(pane_id) = self.focused_pane_id() else {
             return;
         };
         let Some(pane) = snapshot.panes.iter().find(|pane| pane.pane_id == pane_id) else {

@@ -429,11 +429,13 @@ impl ClientShellState {
     fn pane_split_target_is_current(&self, hit: &PaneSplitHit, tab_id: &str) -> Option<bool> {
         let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;
-        if snapshot.revision != surface.projection_revision {
+        // A previewed split's path comes from a remembered screen the endpoint has not
+        // confirmed, so it cannot be sent as a ratio yet.
+        if snapshot.revision != surface.projection_revision || self.previewed_tab.is_some() {
             return None;
         }
         Some(
-            snapshot.focused_tab_id.as_deref() == Some(tab_id)
+            self.effective_focused_tab_id() == Some(tab_id)
                 && pane_surface_topology_signature(surface) == hit.topology_signature,
         )
     }
@@ -452,7 +454,7 @@ impl ClientShellState {
 
     fn tab_drop_index_at(&self, point: (u16, u16)) -> Option<usize> {
         let snapshot = self.snapshot.as_deref()?;
-        let workspace_id = snapshot.focused_workspace_id.as_deref()?;
+        let workspace_id = self.effective_focused_workspace_id()?;
         let tabs = snapshot
             .tabs
             .iter()
@@ -1237,7 +1239,7 @@ impl ClientShellState {
                     } => {
                         let insert_index = self.tab_drop_index_at(point);
                         let valid_drop = self.snapshot.as_deref().is_some_and(|snapshot| {
-                            snapshot.focused_workspace_id.as_deref() == Some(workspace_id.as_str())
+                            self.effective_focused_workspace_id() == Some(workspace_id.as_str())
                                 && snapshot.tabs.iter().any(|tab| {
                                     tab.tab_id == tab_id && tab.workspace_id == workspace_id
                                 })
@@ -2033,14 +2035,13 @@ impl ClientShellState {
                     let tab_count = self
                         .snapshot
                         .as_deref()
-                        .and_then(|snapshot| {
-                            snapshot.focused_workspace_id.as_deref().map(|id| {
-                                snapshot
-                                    .tabs
-                                    .iter()
-                                    .filter(|tab| tab.workspace_id == id)
-                                    .count()
-                            })
+                        .zip(self.effective_focused_workspace_id())
+                        .map(|(snapshot, id)| {
+                            snapshot
+                                .tabs
+                                .iter()
+                                .filter(|tab| tab.workspace_id == id)
+                                .count()
                         })
                         .unwrap_or(0);
                     self.tab_scroll = self
@@ -2175,11 +2176,7 @@ impl ClientShellState {
                     .find(|hit| super::contains(hit.hit_rect, point))
                     .cloned();
                 if let Some(hit) = split_hit {
-                    let Some(tab_id) = self
-                        .snapshot
-                        .as_deref()
-                        .and_then(|snapshot| snapshot.focused_tab_id.clone())
-                    else {
+                    let Some(tab_id) = self.effective_focused_tab_id().map(str::to_owned) else {
                         return;
                     };
                     let pointer = match hit.direction {

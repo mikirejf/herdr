@@ -118,6 +118,76 @@ impl ClientShellState {
         true
     }
 
+    /// The tab the user is looking at: the previewed tab while its focus request awaits the
+    /// endpoint, otherwise the endpoint's focused tab. Requests the user means for the shown
+    /// tab must name it, not the endpoint's still-unchanged focus.
+    pub(super) fn effective_focused_tab_id(&self) -> Option<&str> {
+        match self.previewed_tab.as_ref() {
+            Some(preview) => Some(preview.tab_id.as_str()),
+            None => self.snapshot.as_deref()?.focused_tab_id.as_deref(),
+        }
+    }
+
+    /// The workspace of [`Self::effective_focused_tab_id`].
+    pub(super) fn effective_focused_workspace_id(&self) -> Option<&str> {
+        match self.previewed_tab.as_ref() {
+            Some(preview) => preview.snapshot.focused_workspace_id.as_deref(),
+            None => self.snapshot.as_deref()?.focused_workspace_id.as_deref(),
+        }
+    }
+
+    /// How a request that may move focus affects the preview. `None`: the request leaves the
+    /// preview, so it ends as for any other focus change. `Some(None)`: focus stays on the pane
+    /// shown. `Some(Some(pane_id))`: focus moves to a pane of the previewed tab.
+    pub(super) fn previewed_pane_target(
+        &self,
+        method: &crate::api::schema::Method,
+    ) -> Option<Option<String>> {
+        use crate::api::schema::Method;
+
+        let preview = self.previewed_tab.as_ref()?;
+        let shown = self
+            .focused_pane_id()
+            .unwrap_or_else(|| preview.pane_id.clone());
+        let target = match method {
+            Method::PaneFocus(target) => {
+                let in_tab =
+                    preview.snapshot.panes.iter().any(|pane| {
+                        pane.pane_id == target.pane_id && pane.tab_id == preview.tab_id
+                    });
+                if !in_tab {
+                    return None;
+                }
+                Some(target.pane_id.clone())
+            }
+            Method::PaneFocusDirection(params) => {
+                let source = params.pane_id.as_deref().unwrap_or(&shown);
+                super::pane_focus::pane_in_direction(&preview.surface, source, params.direction)
+                    .flatten()
+            }
+            _ => return None,
+        };
+        Some(target.filter(|pane_id| *pane_id != shown))
+    }
+
+    /// Moves focus to `pane_id` within the previewed tab, as a pane focus prediction carried by
+    /// `request_id`. The prediction outlives the preview, so the endpoint confirming the tab
+    /// before it handles this request does not move keys back. Returns whether the shown focus
+    /// changed.
+    pub(super) fn retarget_tab_preview(&mut self, pane_id: String, request_id: String) -> bool {
+        let changed = self.predict_pane_focus(pane_id.clone(), request_id);
+        let refreshed = self.previewed_tab.as_ref().and_then(|preview| {
+            previewed_snapshot(self.snapshot.as_deref()?, &preview.tab_id, &pane_id)
+        });
+        if let Some(preview) = self.previewed_tab.as_mut() {
+            if let Some(refreshed) = refreshed {
+                preview.snapshot = refreshed;
+            }
+            preview.pane_id = pane_id;
+        }
+        changed
+    }
+
     fn tab_preview_confirmed(&self) -> bool {
         self.previewed_tab.as_ref().is_some_and(|preview| {
             self.snapshot.as_deref().is_some_and(|snapshot| {

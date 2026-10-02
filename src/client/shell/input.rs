@@ -872,7 +872,7 @@ impl ClientShellState {
                 .snapshot
                 .as_deref()
                 .and_then(|snapshot| {
-                    let workspace_id = snapshot.focused_workspace_id.as_deref()?;
+                    let workspace_id = self.effective_focused_workspace_id()?;
                     snapshot
                         .tabs
                         .iter()

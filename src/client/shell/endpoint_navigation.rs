@@ -139,10 +139,7 @@ impl ClientShellState {
             if workspaces.is_empty() {
                 return true;
             }
-            let focused = self
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| snapshot.focused_workspace_id.as_deref());
+            let focused = self.effective_focused_workspace_id();
             let current = workspaces.iter().position(|(endpoint_id, workspace_id)| {
                 endpoint_id == &self.active_endpoint_id && Some(workspace_id.as_str()) == focused
             });
