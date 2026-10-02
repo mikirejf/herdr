@@ -21,11 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use interprocess::local_socket::traits::Listener as _;
 #[cfg(windows)]
-use interprocess::local_socket::traits::Stream as _;
-#[cfg(unix)]
-use interprocess::local_socket::ListenerNonblockingMode;
+use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 #[cfg(windows)]
@@ -39,16 +36,17 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
+#[cfg(windows)]
+use crate::ipc::LocalListener;
 use crate::ipc::{
-    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
-    SocketFileIdentity,
+    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, SocketFileIdentity,
 };
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
 };
 #[cfg(unix)]
 use crate::server::client_accept::{
-    accept_pending_client_connections, reject_pending_client_connections,
+    accept_pending_client_connections, reject_pending_client_connections, ClientListener,
 };
 use crate::server::client_shell::{
     render_pane_surface as render_client_shell_pane_surface,
@@ -135,6 +133,8 @@ enum LoopEvent {
     Api(Box<api::ApiRequestMessage>),
     ServerEvent(ServerEvent),
     RenderRequested,
+    /// A client may be waiting on the listener; the next loop pass accepts it.
+    ClientConnectionPending,
 }
 
 /// Presentation work caused by a server event.
@@ -179,14 +179,13 @@ impl RenderImpact {
 #[allow(dead_code)]
 const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the idle headless loop wakes to poll the local listener for new
-/// client connections.
+/// Upper bound on how long the idle headless loop sleeps.
 ///
-/// The listener is non-blocking and not integrated into `tokio::select!`, so
-/// a low-frequency wake is required to notice new thin-client attaches while
-/// otherwise idle. Keep this much slower than the old resize-poll cadence to
-/// avoid reintroducing the idle CPU spin.
-const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// New client connections wake the loop directly. Some loop-top housekeeping
+/// has no deadline of its own, such as native graphics transfer expiry and
+/// reaping detached processes, and still relies on this wake. Keep it much
+/// slower than the old resize-poll cadence to avoid an idle CPU spin.
+const IDLE_HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Headless server
@@ -215,7 +214,7 @@ pub struct HeadlessServer {
     #[cfg_attr(windows, allow(dead_code))]
     api_server: Option<api::ServerHandle>,
     #[cfg(unix)]
-    client_listener: LocalListener,
+    client_listener: ClientListener,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
@@ -340,9 +339,8 @@ impl HeadlessServer {
         let client_socket_identity = socket_file_identity(&client_path)?;
         info!(path = %client_path.display(), "client protocol socket listening");
 
-        // Set non-blocking on Unix so we can poll it from the event loop.
         #[cfg(unix)]
-        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+        let listener = ClientListener::new(listener)?;
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
@@ -613,8 +611,8 @@ impl HeadlessServer {
                     needs_render,
                     self.has_app_client(),
                 )
-                .map(|deadline| deadline.min(now + CLIENT_ACCEPT_POLL_INTERVAL))
-                .or(Some(now + CLIENT_ACCEPT_POLL_INTERVAL));
+                .map(|deadline| deadline.min(now + IDLE_HOUSEKEEPING_INTERVAL))
+                .or(Some(now + IDLE_HOUSEKEEPING_INTERVAL));
             let next_deadline = self
                 .pending_alt_screen_reads
                 .iter()
@@ -622,6 +620,12 @@ impl HeadlessServer {
                 .fold(next_deadline, |deadline, pending| {
                     Some(deadline.map_or(pending, |current| current.min(pending)))
                 });
+            // Windows accepts on a dedicated thread that reports through
+            // `server_event_rx`, so only Unix waits on the listener here.
+            #[cfg(unix)]
+            let client_connection = self.client_listener.wait_for_connection();
+            #[cfg(windows)]
+            let client_connection = std::future::pending::<io::Result<()>>();
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {
@@ -638,6 +642,10 @@ impl HeadlessServer {
                     },
                     _ = sleep_until_or_pending(next_deadline) => LoopEvent::Timer,
                     _ = self.app.render_notify.notified() => LoopEvent::RenderRequested,
+                    ready = client_connection => {
+                        ready?;
+                        LoopEvent::ClientConnectionPending
+                    }
                 }
             };
 
@@ -666,7 +674,7 @@ impl HeadlessServer {
             }
 
             match event {
-                LoopEvent::Timer => {}
+                LoopEvent::Timer | LoopEvent::ClientConnectionPending => {}
                 LoopEvent::Internal(ev) => {
                     if self.handle_internal_event_with_forwarding(ev) {
                         needs_render = true;
@@ -1022,10 +1030,10 @@ impl HeadlessServer {
     #[cfg(unix)]
     fn accept_client_connections(&mut self) -> io::Result<()> {
         if self.handoff_in_progress {
-            return reject_pending_client_connections(&self.client_listener);
+            return reject_pending_client_connections(self.client_listener.listener());
         }
         accept_pending_client_connections(
-            &self.client_listener,
+            self.client_listener.listener(),
             &mut self.next_client_id,
             &self.should_quit,
             &self.server_event_tx,

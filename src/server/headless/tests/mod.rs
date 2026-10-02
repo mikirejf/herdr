@@ -90,9 +90,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     let client_socket_identity =
         socket_file_identity(&socket_path).expect("test listener socket identity");
     #[cfg(unix)]
-    listener
-        .set_nonblocking(ListenerNonblockingMode::Accept)
-        .expect("set listener nonblocking");
+    let listener = ClientListener::new(listener).expect("set listener nonblocking");
     let (server_event_tx, server_event_rx) = mpsc::channel(64);
     let should_quit = Arc::new(AtomicBool::new(false));
     #[cfg(windows)]

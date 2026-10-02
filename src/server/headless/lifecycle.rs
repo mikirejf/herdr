@@ -56,7 +56,7 @@ impl HeadlessServer {
 
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
-        let _ = reject_pending_client_connections(&self.client_listener);
+        let _ = reject_pending_client_connections(self.client_listener.listener());
 
         let mut paused_terminal_ids = Vec::new();
         for terminal_id in pane_by_terminal.keys() {
@@ -255,7 +255,7 @@ impl HeadlessServer {
         let listener = bind_local_listener(&client_path)?;
         restrict_socket_permissions(&client_path)?;
         let client_socket_identity = socket_file_identity(&client_path)?;
-        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+        let listener = ClientListener::new(listener)?;
 
         self.api_server = Some(api_server);
         self.client_listener = listener;

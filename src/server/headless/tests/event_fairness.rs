@@ -181,3 +181,59 @@ fn external_api_burst_profile() {
         }
     }
 }
+
+// Readiness is a kernel event, so this can only be observed end to end through
+// timing. Before the listener joined the loop's select, an idle loop noticed a
+// client only at its next 250 ms housekeeping wake. The bound sits well under
+// that and far above the sub-millisecond accept a woken loop takes.
+#[cfg(unix)]
+#[tokio::test]
+async fn idle_server_loop_accepts_a_new_client_without_waiting_for_its_housekeeping_wake() {
+    let mut server = test_headless_server();
+    // A closed API channel would wake the loop continuously.
+    let (_api_tx, api_rx) = mpsc::unbounded_channel();
+    server.app.api_rx = api_rx;
+    let socket_path = server.client_socket_path.clone();
+    let should_quit = server.should_quit.clone();
+    let quit_notify = server.server_event_tx.clone();
+    let client = std::thread::spawn(move || {
+        // Let the loop finish startup work and park in its idle wait.
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let mut stream = crate::ipc::connect_local_stream(&socket_path).unwrap();
+        // Version 0 is rejected by the handshake thread right after accept, so
+        // the reply time is the accept latency.
+        protocol::write_message(
+            &mut stream,
+            &protocol::ClientMessage::TerminalHello {
+                version: 0,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                pixel_mouse: false,
+            },
+        )
+        .unwrap();
+        let reply: ServerMessage = protocol::read_message(&mut stream, MAX_FRAME_SIZE).unwrap();
+        let elapsed = started.elapsed();
+        should_quit.store(true, Ordering::Release);
+        quit_notify.blocking_send(ServerEvent::QuitSignal).unwrap();
+        (reply, elapsed)
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), server.run())
+        .await
+        .expect("server loop stops after the quit signal")
+        .expect("server loop shuts down cleanly");
+
+    let (reply, elapsed) = client.join().unwrap();
+    assert!(
+        matches!(reply, ServerMessage::Welcome { error: Some(_), .. }),
+        "unexpected reply: {reply:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "idle server took {elapsed:?} to accept a client"
+    );
+}
