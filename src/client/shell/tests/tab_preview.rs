@@ -792,9 +792,89 @@ fn second_pane(projected: &ClientShellSnapshot) -> ClientShellPane {
 fn previewing_two_pane_tab_3() -> ClientShellState {
     let mut state = visited(&["tab_3", "tab_1"]);
     with_second_pane_in_tab_3(&mut state);
+    give_pane_focus_style(&mut state);
     request(&mut state, ClientEndpointFocusTarget::Tab("tab_3".into()));
     assert!(state.previewed_tab.is_some());
     state
+}
+
+#[test]
+fn pane_focus_inside_a_preview_without_a_focus_style_waits_for_the_endpoint() {
+    use crate::api::schema::{Method, PaneDirection, PaneFocusDirectionParams};
+
+    let unstyled = || {
+        let mut state = visited(&["tab_3", "tab_1"]);
+        with_second_pane_in_tab_3(&mut state);
+        request(&mut state, ClientEndpointFocusTarget::Tab("tab_3".into()));
+        assert!(state.previewed_tab.is_some());
+        state
+    };
+
+    let mut by_pane = unstyled();
+    request(
+        &mut by_pane,
+        ClientEndpointFocusTarget::Pane("pane_3b".into()),
+    );
+    assert!(by_pane.previewed_tab.is_none());
+    assert!(by_pane.predicted_pane_focus.is_none());
+    assert_eq!(typed_pane(&mut by_pane), "pane_1");
+
+    let mut by_direction = unstyled();
+    let mut outcome = ClientShellInput::default();
+    by_direction.push_endpoint_method(
+        Method::PaneFocusDirection(PaneFocusDirectionParams {
+            pane_id: None,
+            direction: PaneDirection::Right,
+        }),
+        &mut outcome,
+    );
+    assert!(by_direction.previewed_tab.is_none());
+    assert_eq!(typed_pane(&mut by_direction), "pane_1");
+
+    let mut same_pane = unstyled();
+    request(
+        &mut same_pane,
+        ClientEndpointFocusTarget::Pane("pane_3".into()),
+    );
+    assert!(same_pane.previewed_tab.is_some());
+    assert_eq!(typed_pane(&mut same_pane), "pane_3");
+}
+
+#[test]
+fn focusing_a_pane_while_previewing_keeps_the_pane_the_user_left_as_previous() {
+    let last_pane = |state: &mut ClientShellState| {
+        let outcome = record(state, crate::input::KeybindAction::LastPane);
+        match recorded_methods(&outcome).as_slice() {
+            [crate::api::schema::Method::PaneFocus(target)] => Some(target.pane_id.clone()),
+            _ => None,
+        }
+    };
+
+    // Straight to another pane of the remembered tab, whose screen shows `pane_3` focused.
+    let mut direct = visited(&["tab_3", "tab_1"]);
+    with_second_pane_in_tab_3(&mut direct);
+    give_pane_focus_style(&mut direct);
+    focus_pane(&mut direct, "pane_3b");
+    assert_eq!(typed_pane(&mut direct), "pane_3b");
+    assert_eq!(direct.previous_pane_id.as_deref(), Some("pane_1"));
+    assert_eq!(last_pane(&mut direct).as_deref(), Some("pane_1"));
+
+    // Through a preview of the tab first, then a pane of it, then another.
+    let mut staged = previewing_two_pane_tab_3();
+    focus_pane(&mut staged, "pane_3b");
+    assert_eq!(staged.previous_pane_id.as_deref(), Some("pane_1"));
+    focus_pane(&mut staged, "pane_3");
+    assert_eq!(staged.previous_pane_id.as_deref(), Some("pane_1"));
+
+    // Once the endpoint focuses the tab, its snapshot has recorded the pane the user left.
+    let mut confirmed = previewing_two_pane_tab_3();
+    let mut projected = tabs_snapshot("tab_3", 3);
+    projected.panes.push(second_pane(&projected));
+    confirmed.set_snapshot(Box::new(projected));
+    assert_eq!(confirmed.previous_pane_id.as_deref(), Some("pane_1"));
+    assert!(confirmed.previewed_tab.is_some(), "the surface is missing");
+    focus_pane(&mut confirmed, "pane_3b");
+    assert_eq!(confirmed.previous_pane_id.as_deref(), Some("pane_1"));
 }
 
 #[test]

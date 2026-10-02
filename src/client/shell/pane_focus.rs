@@ -100,6 +100,22 @@ impl ClientShellState {
         pane_in_direction(self.pane_surface.as_ref()?, source, direction)
     }
 
+    /// The pane a focus change leaves, given the pane `presented` before it. A tab preview
+    /// presents the remembered screen's pane, not the one the user was in; the endpoint records
+    /// its own focused pane as the previous one.
+    fn pane_left_by_focus_change(&self, presented: Option<String>) -> Option<String> {
+        let Some(preview) = self.previewed_tab.as_ref() else {
+            return presented;
+        };
+        // Once the endpoint focuses the previewed tab, its snapshot already recorded the pane
+        // the user left.
+        self.snapshot
+            .as_deref()
+            .filter(|snapshot| snapshot.focused_tab_id.as_deref() != Some(preview.tab_id.as_str()))
+            .and_then(|snapshot| snapshot.focused_pane_id.clone())
+            .or_else(|| self.previous_pane_id.clone())
+    }
+
     /// Returns whether the presented focus changed.
     pub(super) fn predict_pane_focus(&mut self, pane_id: String, request_id: String) -> bool {
         let presented = self.focused_pane_id();
@@ -110,7 +126,7 @@ impl ClientShellState {
         }
         let changed = presented.as_deref() != Some(pane_id.as_str());
         if changed {
-            self.previous_pane_id = presented;
+            self.previous_pane_id = self.pane_left_by_focus_change(presented);
         }
         self.predicted_pane_focus = Some(PredictedPaneFocus {
             pane_id,

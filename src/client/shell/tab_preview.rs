@@ -32,7 +32,7 @@ const TAB_SCREEN_INPUT_QUIET: std::time::Duration = std::time::Duration::from_se
 
 /// A tab's remembered screen, shown while a focus request for that tab awaits its endpoint.
 pub(super) struct PreviewedTab {
-    tab_id: String,
+    pub(super) tab_id: String,
     pub(super) pane_id: String,
     /// The request whose failure drops the preview. A newer focus request replaces it.
     request_id: String,
@@ -312,7 +312,16 @@ impl ClientShellState {
             }
             _ => return None,
         };
-        Some(target.filter(|pane_id| *pane_id != shown))
+        let target = target.filter(|pane_id| *pane_id != shown);
+        // Without the style the client cannot draw the new pane focused on the remembered screen.
+        let can_restyle = self
+            .snapshot
+            .as_deref()
+            .is_some_and(|snapshot| snapshot.pane_focus_style.is_some());
+        if target.is_some() && !can_restyle {
+            return None;
+        }
+        Some(target)
     }
 
     /// Moves focus to `pane_id` within the previewed tab, as a pane focus prediction carried by
