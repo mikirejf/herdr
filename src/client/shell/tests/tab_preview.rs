@@ -1023,3 +1023,126 @@ fn rejected_pane_focus_during_a_preview_drops_the_preview() {
     assert!(state.previewed_tab.is_none());
     assert!(state.predicted_pane_focus.is_none());
 }
+
+fn give_pane_focus_style(state: &mut ClientShellState) {
+    let color = ratatui::style::Color::Rgb(200, 120, 0);
+    let style = crate::protocol::ClientShellPaneFocusStyle::new(
+        crate::ui::PaneFocusColors {
+            accent: color,
+            overlay0: color,
+            overlay1: color,
+            surface_dim: color,
+        },
+        true,
+    );
+    state
+        .snapshot
+        .as_mut()
+        .expect("presented snapshot")
+        .pane_focus_style = Some(style);
+}
+
+fn focus_pane(state: &mut ClientShellState, pane_id: &str) -> String {
+    request(state, ClientEndpointFocusTarget::Pane(pane_id.into()))
+}
+
+#[test]
+fn focusing_the_focused_pane_of_a_remembered_tab_previews_that_tab() {
+    let mut state = visited(&["tab_3", "tab_1"]);
+
+    let id = focus_pane(&mut state, "pane_3");
+
+    assert!(state.previewed_tab.is_some());
+    assert!(state.predicted_pane_focus.is_none());
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_3"));
+    assert_eq!(tab_bar(&state), ["tab_1", "tab_3"]);
+    assert_eq!(typed_pane(&mut state), "pane_3");
+
+    settle(&mut state, &id);
+    present(&mut state, "tab_3", 3);
+
+    assert!(state.previewed_tab.is_none(), "the tab is confirmed");
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_3"));
+    assert_eq!(typed_pane(&mut state), "pane_3");
+}
+
+#[test]
+fn focusing_another_pane_of_a_remembered_tab_previews_it_with_that_pane_focused() {
+    let mut state = visited(&["tab_3", "tab_1"]);
+    with_second_pane_in_tab_3(&mut state);
+    give_pane_focus_style(&mut state);
+
+    let id = focus_pane(&mut state, "pane_3b");
+
+    assert!(state.previewed_tab.is_some());
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_3"));
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+    let preview = state.previewed_tab.as_ref().expect("preview");
+    assert_eq!(preview.pane_id, "pane_3b");
+    assert_eq!(preview.snapshot.focused_pane_id.as_deref(), Some("pane_3b"));
+    assert_eq!(preview.snapshot.focused_tab_id.as_deref(), Some("tab_3"));
+
+    present_tab_3(&mut state, 3, "pane_3b");
+    settle(&mut state, &id);
+
+    assert!(state.previewed_tab.is_none());
+    assert!(state.predicted_pane_focus.is_none());
+    assert_eq!(typed_pane(&mut state), "pane_3b");
+}
+
+#[test]
+fn focusing_a_pane_in_another_workspace_previews_that_workspace() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+
+    focus_pane(&mut state, "pane_2");
+
+    let preview = state.previewed_tab.as_ref().expect("preview");
+    assert_eq!(
+        preview.snapshot.focused_workspace_id.as_deref(),
+        Some("ws_2")
+    );
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_2"));
+    assert_eq!(highlighted_workspace(&mut state), ["ws_2"]);
+    assert_eq!(typed_pane(&mut state), "pane_2");
+}
+
+#[test]
+fn focusing_a_pane_of_a_tab_with_no_usable_screen_waits_for_the_endpoint() {
+    let mut unvisited = visited(&["tab_1"]);
+    focus_pane(&mut unvisited, "pane_2");
+    assert!(unvisited.previewed_tab.is_none());
+    assert_eq!(typed_pane(&mut unvisited), "pane_1");
+
+    // The remembered screen is zoomed on `pane_3`, so it cannot show `pane_3b`.
+    let mut zoomed = visited(&["tab_3", "tab_1"]);
+    let mut projected = tabs_snapshot("tab_1", 2);
+    projected.panes.push(second_pane(&projected));
+    zoomed.set_snapshot(Box::new(projected));
+    give_pane_focus_style(&mut zoomed);
+    focus_pane(&mut zoomed, "pane_3b");
+    assert!(zoomed.previewed_tab.is_none());
+    assert_eq!(typed_pane(&mut zoomed), "pane_1");
+
+    // Moving focus within the remembered screen needs the client to restyle it.
+    let mut unstyled = visited(&["tab_3", "tab_1"]);
+    with_second_pane_in_tab_3(&mut unstyled);
+    focus_pane(&mut unstyled, "pane_3b");
+    assert!(unstyled.previewed_tab.is_none());
+    assert_eq!(typed_pane(&mut unstyled), "pane_1");
+}
+
+#[test]
+fn rejected_pane_focus_drops_the_cross_tab_preview() {
+    let mut state = visited(&["tab_3", "tab_1"]);
+    with_second_pane_in_tab_3(&mut state);
+    give_pane_focus_style(&mut state);
+    let id = focus_pane(&mut state, "pane_3b");
+    assert!(state.previewed_tab.is_some());
+
+    reject(&mut state, &id);
+
+    assert!(state.previewed_tab.is_none());
+    assert!(state.predicted_pane_focus.is_none());
+    assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_1"));
+    assert_eq!(typed_pane(&mut state), "pane_1");
+}

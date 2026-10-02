@@ -375,22 +375,37 @@ impl ClientShellState {
             }
             _ => None,
         };
+        // A pane focus inside the previewed tab keeps showing the tab until its endpoint
+        // confirms it; dropping the preview would show the old tab again.
+        let retargeted_pane = self.previewed_pane_target(&method);
+        // The tab to preview, and the pane to show focused in it (`None`: the tab's own focus).
         let previewed_tab = match &method {
-            crate::api::schema::Method::WorkspaceFocus(target) => {
-                self.snapshot.as_deref().and_then(|snapshot| {
+            crate::api::schema::Method::WorkspaceFocus(target) => self
+                .snapshot
+                .as_deref()
+                .and_then(|snapshot| {
                     snapshot
                         .workspaces
                         .iter()
                         .find(|workspace| workspace.workspace_id == target.workspace_id)
                         .map(|workspace| workspace.active_tab_id.clone())
                 })
+                .map(|tab_id| (tab_id, None)),
+            crate::api::schema::Method::TabFocus(target) => Some((target.tab_id.clone(), None)),
+            crate::api::schema::Method::PaneFocus(target)
+                if predicted_pane.is_none() && retargeted_pane.is_none() =>
+            {
+                self.snapshot.as_deref().and_then(|snapshot| {
+                    snapshot
+                        .panes
+                        .iter()
+                        .find(|pane| pane.pane_id == target.pane_id)
+                        .filter(|pane| snapshot.focused_tab_id.as_ref() != Some(&pane.tab_id))
+                        .map(|pane| (pane.tab_id.clone(), Some(target.pane_id.clone())))
+                })
             }
-            crate::api::schema::Method::TabFocus(target) => Some(target.tab_id.clone()),
             _ => None,
         };
-        // A pane focus inside the previewed tab keeps showing the tab until its endpoint
-        // confirms it; dropping the preview would show the old tab again.
-        let retargeted_pane = self.previewed_pane_target(&method);
         if changes_focus {
             outcome.repaint |= self.pending_workspace_highlight.take().is_some();
             // A request that leaves the previewed tab's shown pane unchanged must keep the
@@ -460,8 +475,8 @@ impl ClientShellState {
         });
         if let Some(pane_id) = predicted_pane {
             outcome.repaint |= self.predict_pane_focus(pane_id, request_id);
-        } else if let Some(tab_id) = previewed_tab {
-            outcome.repaint |= self.start_tab_preview(&tab_id, request_id);
+        } else if let Some((tab_id, pane_id)) = previewed_tab {
+            outcome.repaint |= self.start_tab_preview(&tab_id, pane_id.as_deref(), request_id);
         } else if let Some(Some(pane_id)) = retargeted_pane {
             outcome.repaint |= self.retarget_tab_preview(pane_id, request_id);
         }

@@ -68,9 +68,15 @@ impl ClientShellState {
             .insert((self.active_endpoint_id.clone(), tab_id), surface);
     }
 
-    /// Shows the remembered screen of `tab_id` as if `request_id` had already focused it.
-    /// Returns whether a preview started.
-    pub(super) fn start_tab_preview(&mut self, tab_id: &str, request_id: String) -> bool {
+    /// Shows the remembered screen of `tab_id` as if `request_id` had already focused it, with
+    /// focus on `pane_id` when given, otherwise on the pane that screen shows focused. Returns
+    /// whether a preview started.
+    pub(super) fn start_tab_preview(
+        &mut self,
+        tab_id: &str,
+        pane_id: Option<&str>,
+        request_id: String,
+    ) -> bool {
         // Copy mode and popups keep routing keys to the old tab's terminals.
         if self.copy_mode.is_some() || self.popup_terminal_id.is_some() {
             return false;
@@ -95,7 +101,7 @@ impl ClientShellState {
         else {
             return false;
         };
-        let Some(pane_id) = surface
+        let Some(shown_pane_id) = surface
             .panes
             .iter()
             .find(|pane| pane.focused)
@@ -104,17 +110,34 @@ impl ClientShellState {
         else {
             return false;
         };
-        let Some(preview_snapshot) = previewed_snapshot(snapshot, tab_id, &pane_id) else {
+        let retarget = match pane_id {
+            Some(pane_id) if pane_id != shown_pane_id => {
+                // A zoomed remembered screen may not show the pane at all.
+                let shown = surface.panes.iter().any(|pane| pane.pane_id == pane_id)
+                    && snapshot.panes.iter().any(|pane| pane.pane_id == pane_id);
+                // The remembered screen shows another pane focused; only the client can
+                // restyle it.
+                if !shown || snapshot.pane_focus_style.is_none() {
+                    return false;
+                }
+                Some(pane_id.to_owned())
+            }
+            _ => None,
+        };
+        let Some(preview_snapshot) = previewed_snapshot(snapshot, tab_id, &shown_pane_id) else {
             return false;
         };
         self.previewed_tab = Some(PreviewedTab {
             tab_id: tab_id.to_owned(),
-            pane_id,
-            request_id,
+            pane_id: shown_pane_id,
+            request_id: request_id.clone(),
             snapshot: preview_snapshot,
             surface: surface.clone(),
         });
         self.pending_workspace_highlight = None;
+        if let Some(pane_id) = retarget {
+            self.retarget_tab_preview(pane_id, request_id);
+        }
         true
     }
 
