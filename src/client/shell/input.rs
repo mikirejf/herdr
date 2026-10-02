@@ -158,6 +158,11 @@ impl ClientShellState {
 
     pub(crate) fn handle_raw_events(&mut self, events: Vec<RawInputEvent>) -> ClientShellInput {
         let mut outcome = ClientShellInput::default();
+        // Every input path ends here, after classification: terminal bytes, pixel mouse and
+        // Windows events. Host replies and focus reports must not hold back tab screen prefetch.
+        if crate::raw_input::events_carry_user_input(&events) {
+            self.note_user_input(std::time::Instant::now());
+        }
         if !events.is_empty() && self.endpoint_error.take().is_some() {
             self.endpoint_error_deadline = None;
             outcome.repaint = true;

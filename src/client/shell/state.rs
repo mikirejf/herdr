@@ -895,6 +895,8 @@ pub(crate) struct ClientShellState {
     /// The last presented screen of each tab this client left, keyed by endpoint and tab ID.
     pub(super) remembered_tab_screens: HashMap<(ClientEndpointId, String), PaneSurfaceFrame>,
     pub(super) tab_screen_requests: Option<TabScreenRequests>,
+    /// When the user last pressed a key, used the mouse or pasted. `None` until the first input.
+    pub(super) last_user_input: Option<std::time::Instant>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
     pub(super) previous_pane_id: Option<String>,
@@ -1064,6 +1066,7 @@ impl ClientShellState {
             previewed_tab: None,
             remembered_tab_screens: HashMap::new(),
             tab_screen_requests: None,
+            last_user_input: None,
             reveal_navigation_workspace: false,
             overlay,
             previous_pane_id: None,

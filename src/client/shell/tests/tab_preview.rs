@@ -619,3 +619,124 @@ fn stale_boot_reply_does_not_end_the_wait_for_the_rebooted_request() {
         Some("tab_2")
     );
 }
+
+#[test]
+fn user_input_holds_back_the_next_request_for_a_second() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    state.note_user_input(start + ms(500));
+
+    assert_eq!(next_request(&mut state, start, 600), None);
+    assert_eq!(next_request(&mut state, start, 1499), None);
+    assert_eq!(
+        next_request(&mut state, start, 1500).as_deref(),
+        Some("tab_3")
+    );
+}
+
+#[test]
+fn user_input_keeps_the_in_flight_tab_and_delays_only_the_next_request() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    assert_eq!(
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
+    );
+
+    state.note_user_input(start + ms(400));
+    assert_eq!(
+        state.tab_screen_request_deadline(start + ms(450)),
+        Some(start + ms(1300)),
+        "the reply deadline of the in-flight tab still stands"
+    );
+
+    receive_screen(&mut state, "tab_3", tab_surface(COLS, ROWS, "tab_3", 0));
+    assert_eq!(next_request(&mut state, start, 500), None);
+    assert_eq!(next_request(&mut state, start, 1399), None);
+    assert_eq!(
+        next_request(&mut state, start, 1400).as_deref(),
+        Some("tab_4")
+    );
+}
+
+#[test]
+fn deadline_reports_the_end_of_the_input_quiet_period() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    state.note_user_input(start + ms(500));
+
+    assert_eq!(
+        state.tab_screen_request_deadline(start + ms(600)),
+        Some(start + ms(1500))
+    );
+    assert_eq!(state.tab_screen_request_deadline(start + ms(1500)), None);
+}
+
+
+/// Feeds `input` to a state that has asked for no tab screen yet, then returns whether the next
+/// request is still held back once the surface size has settled.
+fn input_holds_back_prefetch(input: impl FnOnce(&mut ClientShellState)) -> bool {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+
+    input(&mut state);
+
+    let held_back = next_request(&mut state, start, 300).is_none();
+    if held_back {
+        // Milliseconds round down, so one more keeps the probe past the end of the hold.
+        let after = start.elapsed().as_millis() as u64;
+        assert_eq!(
+            next_request(&mut state, start, after + 1001).as_deref(),
+            Some("tab_3"),
+            "the hold lasts one second"
+        );
+    }
+    held_back
+}
+
+#[test]
+fn pixel_mouse_wheel_holds_back_prefetch_for_a_second() {
+    let geometry = crate::input::mouse::HostGeometry::new(
+        COLS,
+        ROWS,
+        u32::from(COLS) * 10,
+        u32::from(ROWS) * 20,
+    )
+    .unwrap();
+
+    assert!(input_holds_back_prefetch(|state| {
+        state.handle_pixel_mouse(b"\x1b[<64;321;241M", geometry);
+    }));
+}
+
+#[test]
+fn keys_and_mouse_hold_back_prefetch() {
+    assert!(input_holds_back_prefetch(|state| {
+        state.handle_input_bytes(b"x");
+    }));
+    assert!(input_holds_back_prefetch(|state| {
+        state.handle_input_bytes(b"\x1b[<64;3;4M");
+    }));
+}
+
+#[test]
+fn host_replies_and_focus_reports_do_not_hold_back_prefetch() {
+    for reply in [
+        b"\x1b]4;0;rgb:1111/2222/3333\x1b\\".as_slice(),
+        b"\x1b[I".as_slice(),
+        b"\x1b[O".as_slice(),
+        b"\x1b[6;21;10t".as_slice(),
+    ] {
+        assert!(
+            !input_holds_back_prefetch(|state| {
+                state.handle_input_bytes(reply);
+            }),
+            "{reply:?}"
+        );
+    }
+}
+

@@ -844,6 +844,9 @@ async fn run_client_loop(
                                     image,
                                     "clipboard paste",
                                 )?;
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.note_user_input(std::time::Instant::now());
+                                }
                                 continue;
                             }
                             info!(
@@ -859,6 +862,9 @@ async fn run_client_loop(
                                 image,
                                 "file drop",
                             )?;
+                            if let Some(shell) = state.shell.as_mut() {
+                                shell.note_user_input(std::time::Instant::now());
+                            }
                             continue;
                         }
                     }
@@ -1147,6 +1153,9 @@ async fn run_client_loop(
                                     image,
                                     "clipboard paste",
                                 )?;
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.note_user_input(std::time::Instant::now());
+                                }
                                 continue;
                             }
                             info!(
@@ -1162,6 +1171,9 @@ async fn run_client_loop(
                                 image,
                                 "file drop",
                             )?;
+                            if let Some(shell) = state.shell.as_mut() {
+                                shell.note_user_input(std::time::Instant::now());
+                            }
                             continue;
                         }
                     }

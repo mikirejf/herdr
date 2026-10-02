@@ -26,6 +26,9 @@ struct InFlightTabScreen {
 
 const TAB_SCREEN_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
 const TAB_SCREEN_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Prefetched screens share the link with live echo, so no new one is asked for until the user
+/// has stopped typing this long.
+const TAB_SCREEN_INPUT_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A tab's remembered screen, shown while a focus request for that tab awaits its endpoint.
 pub(super) struct PreviewedTab {
@@ -203,8 +206,12 @@ impl ClientShellState {
         {
             requests.in_flight = None;
         }
+        let user_idle = self
+            .last_user_input
+            .is_none_or(|input| now.saturating_duration_since(input) >= TAB_SCREEN_INPUT_QUIET);
         if requests.in_flight.is_some()
             || now.saturating_duration_since(size_since) < TAB_SCREEN_SIZE_SETTLE
+            || !user_idle
         {
             self.tab_screen_requests = Some(requests);
             return None;
@@ -237,20 +244,29 @@ impl ClientShellState {
         wanted
     }
 
+    /// Notes that the user just gave input, which holds back the next tab screen request.
+    pub(crate) fn note_user_input(&mut self, now: std::time::Instant) {
+        self.last_user_input = Some(now);
+    }
+
     /// The next moment tab screen prefetch can make progress without other input: the surface
-    /// size settling, or the in-flight reply timing out.
+    /// size settling, the user input going quiet, or the in-flight reply timing out.
     pub(super) fn tab_screen_request_deadline(
         &self,
         now: std::time::Instant,
     ) -> Option<std::time::Instant> {
         let requests = self.tab_screen_requests.as_ref()?;
         let settled = requests.size_since + TAB_SCREEN_SIZE_SETTLE;
+        let quiet = self
+            .last_user_input
+            .map(|input| input + TAB_SCREEN_INPUT_QUIET);
         requests
             .in_flight
             .as_ref()
             .map(|in_flight| in_flight.deadline)
             .into_iter()
             .chain([settled])
+            .chain(quiet)
             .filter(|deadline| *deadline > now)
             .min()
     }

@@ -798,6 +798,19 @@ pub(crate) fn events_require_host_surface_redraw(
             .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
 }
 
+/// Whether the user gave input, as opposed to the host terminal replying or reporting focus.
+pub(crate) fn events_carry_user_input(events: &[RawInputEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            RawInputEvent::Key(_)
+                | RawInputEvent::Text(_)
+                | RawInputEvent::Paste(_)
+                | RawInputEvent::Mouse(_)
+        )
+    })
+}
+
 #[cfg(any(unix, test))]
 pub(crate) fn events_require_host_mode_refresh(events: &[RawInputEvent]) -> bool {
     events
@@ -1717,6 +1730,36 @@ mod tests {
             events[0],
             RawInputEvent::HostColorSchemeChanged(HostAppearance::Dark)
         ));
+    }
+
+    #[test]
+    fn only_the_users_own_input_counts_as_user_input() {
+        for bytes in [
+            b"a".as_slice(),
+            b"\x1b[A".as_slice(),
+            b"\x1b[200~pasted\x1b[201~".as_slice(),
+            b"\x1b[<64;3;4M".as_slice(),
+        ] {
+            assert!(
+                events_carry_user_input(&parse_raw_input_bytes_sync(bytes)),
+                "{bytes:?}"
+            );
+        }
+        for bytes in [
+            b"\x1b]4;0;rgb:1111/2222/3333\x1b\\".as_slice(),
+            b"\x1b]11;rgb:1111/2222/3333\x1b\\".as_slice(),
+            b"\x1b[I".as_slice(),
+            b"\x1b[O".as_slice(),
+            b"\x1b[6;21;10t".as_slice(),
+            b"\x1b[?997;1n".as_slice(),
+            b"\x1b[?62;4c".as_slice(),
+            b"\x1b[?2026;2$y".as_slice(),
+        ] {
+            assert!(
+                !events_carry_user_input(&parse_raw_input_bytes_sync(bytes)),
+                "{bytes:?}"
+            );
+        }
     }
 
     #[test]
