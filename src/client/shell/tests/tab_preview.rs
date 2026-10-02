@@ -428,43 +428,194 @@ fn received_screen_does_not_replace_a_remembered_one() {
     assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_2"));
 }
 
+fn ms(millis: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(millis)
+}
+
+fn next_request(
+    state: &mut ClientShellState,
+    start: std::time::Instant,
+    at_ms: u64,
+) -> Option<String> {
+    state.take_tab_screen_request(COLS, ROWS, start + ms(at_ms))
+}
+
 #[test]
-fn unseen_tabs_are_requested_once_per_settled_surface_size() {
+fn unseen_tabs_wait_for_the_surface_size_to_settle() {
     let mut state = visited(&["tab_2", "tab_1"]);
     let start = std::time::Instant::now();
-    let at = |ms| start + std::time::Duration::from_millis(ms);
 
-    assert!(state.take_tab_screen_requests(COLS, ROWS, at(0)).is_empty());
+    assert_eq!(next_request(&mut state, start, 0), None);
+    assert_eq!(state.timer_delay(start + ms(250)), ms(50));
+    assert_eq!(next_request(&mut state, start, 299), None);
     assert_eq!(
-        state.timer_delay(at(250)),
-        std::time::Duration::from_millis(50)
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
     );
-    assert_eq!(
-        state.take_tab_screen_requests(COLS, ROWS, at(300)),
-        ["tab_3", "tab_4"]
-    );
-    assert!(state
-        .take_tab_screen_requests(COLS, ROWS, at(400))
-        .is_empty());
-    state.set_snapshot(Box::new(tabs_snapshot("tab_1", 9)));
-    assert!(state
-        .take_tab_screen_requests(COLS, ROWS, at(500))
-        .is_empty());
+}
 
-    for (step, ms) in [1000, 1100, 1200].into_iter().enumerate() {
-        let cols = COLS + 1 + step as u16;
-        assert!(state
-            .take_tab_screen_requests(cols, ROWS, at(ms))
-            .is_empty());
-    }
-    assert!(state
-        .take_tab_screen_requests(COLS + 3, ROWS, at(1499))
-        .is_empty());
+#[test]
+fn one_tab_screen_is_in_flight_until_it_arrives() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+
     assert_eq!(
-        state.take_tab_screen_requests(COLS + 3, ROWS, at(1500)),
-        ["tab_3", "tab_2", "tab_4"]
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
     );
+    assert_eq!(next_request(&mut state, start, 301), None);
+    assert_eq!(next_request(&mut state, start, 1000), None);
+
+    receive_screen(&mut state, "tab_3", tab_surface(COLS, ROWS, "tab_3", 0));
+    assert_eq!(
+        next_request(&mut state, start, 1001).as_deref(),
+        Some("tab_4")
+    );
+    assert_eq!(next_request(&mut state, start, 1002), None);
+    receive_screen(&mut state, "tab_4", tab_surface(COLS, ROWS, "tab_4", 0));
+    assert_eq!(next_request(&mut state, start, 1003), None);
     assert!(state
-        .take_tab_screen_requests(COLS + 3, ROWS, at(1600))
-        .is_empty());
+        .remembered_tab_screens
+        .contains_key(&(ClientEndpointId::Local, "tab_4".into())));
+}
+
+#[test]
+fn unanswered_tab_screen_is_skipped_after_a_second() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    assert_eq!(
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
+    );
+
+    assert_eq!(next_request(&mut state, start, 1299), None);
+    assert_eq!(
+        next_request(&mut state, start, 1300).as_deref(),
+        Some("tab_4")
+    );
+    receive_screen(&mut state, "tab_4", tab_surface(COLS, ROWS, "tab_4", 0));
+    assert_eq!(next_request(&mut state, start, 1400), None);
+    assert_eq!(next_request(&mut state, start, 5000), None);
+}
+
+#[test]
+fn late_screen_of_a_skipped_tab_does_not_end_the_wait_for_the_next() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    next_request(&mut state, start, 300);
+    assert_eq!(
+        next_request(&mut state, start, 1300).as_deref(),
+        Some("tab_4")
+    );
+
+    receive_screen(&mut state, "tab_3", tab_surface(COLS, ROWS, "tab_3", 0));
+
+    assert_eq!(next_request(&mut state, start, 1400), None);
+}
+
+#[test]
+fn timer_delay_reports_the_in_flight_deadline() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    next_request(&mut state, start, 300);
+
+    assert_eq!(state.timer_delay(start + ms(350)), ms(100));
+    assert_eq!(state.timer_delay(start + ms(1250)), ms(50));
+    assert_eq!(state.timer_delay(start + ms(1300)), ms(100));
+}
+
+#[test]
+fn surface_size_change_drops_the_in_flight_tab_and_asks_again() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    assert_eq!(
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
+    );
+
+    let resized = |state: &mut ClientShellState, at_ms| {
+        state.take_tab_screen_request(COLS + 1, ROWS, start + ms(at_ms))
+    };
+    assert_eq!(resized(&mut state, 400), None);
+    assert_eq!(resized(&mut state, 699), None);
+    assert_eq!(resized(&mut state, 700).as_deref(), Some("tab_3"));
+    assert_eq!(resized(&mut state, 701), None);
+}
+
+#[test]
+fn snapshot_of_a_new_boot_resets_requests() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    assert_eq!(
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
+    );
+
+    let mut rebooted = tabs_snapshot("tab_1", 9);
+    rebooted.boot_id = "boot-2".into();
+    state.set_snapshot(Box::new(rebooted));
+
+    assert_eq!(
+        next_request(&mut state, start, 400).as_deref(),
+        Some("tab_3")
+    );
+    assert_eq!(next_request(&mut state, start, 401), None);
+}
+
+#[test]
+fn stale_size_reply_does_not_end_the_wait_for_the_resized_request() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    assert_eq!(
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
+    );
+    let resized = |state: &mut ClientShellState, at_ms| {
+        state.take_tab_screen_request(COLS + 1, ROWS, start + ms(at_ms))
+    };
+    assert_eq!(resized(&mut state, 400), None);
+    assert_eq!(resized(&mut state, 700).as_deref(), Some("tab_3"));
+
+    receive_screen(&mut state, "tab_3", tab_surface(COLS, ROWS, "tab_3", 0));
+
+    assert_eq!(resized(&mut state, 800), None);
+    assert_eq!(resized(&mut state, 1699), None);
+    receive_screen(&mut state, "tab_3", tab_surface(COLS + 1, ROWS, "tab_3", 0));
+    assert_eq!(resized(&mut state, 1700).as_deref(), Some("tab_2"));
+}
+
+#[test]
+fn stale_boot_reply_does_not_end_the_wait_for_the_rebooted_request() {
+    let mut state = visited(&["tab_2", "tab_1"]);
+    let start = std::time::Instant::now();
+    next_request(&mut state, start, 0);
+    assert_eq!(
+        next_request(&mut state, start, 300).as_deref(),
+        Some("tab_3")
+    );
+    let mut rebooted = tabs_snapshot("tab_1", 9);
+    rebooted.boot_id = "boot-2".into();
+    state.set_snapshot(Box::new(rebooted));
+    assert_eq!(
+        next_request(&mut state, start, 400).as_deref(),
+        Some("tab_3")
+    );
+
+    receive_screen(&mut state, "tab_3", tab_surface(COLS, ROWS, "tab_3", 0));
+
+    assert_eq!(next_request(&mut state, start, 500), None);
+    let mut current = tab_surface(COLS, ROWS, "tab_3", 0);
+    current.boot_id = "boot-2".into();
+    receive_screen(&mut state, "tab_3", current);
+    assert_eq!(
+        next_request(&mut state, start, 501).as_deref(),
+        Some("tab_2")
+    );
 }

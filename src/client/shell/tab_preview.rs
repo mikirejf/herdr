@@ -12,9 +12,20 @@ pub(super) struct TabScreenRequests {
     /// not ask for every tab at every intermediate size.
     size_since: std::time::Instant,
     tab_ids: HashSet<String>,
+    /// The one tab whose screen was asked for and has not arrived. The next tab waits for its
+    /// reply so prefetched screens never queue ahead of live surface updates.
+    in_flight: Option<InFlightTabScreen>,
+}
+
+struct InFlightTabScreen {
+    tab_id: String,
+    /// The endpoint skips a tab that closed, became the shown tab or failed to render, without
+    /// replying, so the wait for a reply must end on its own.
+    deadline: std::time::Instant,
 }
 
 const TAB_SCREEN_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+const TAB_SCREEN_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A tab's remembered screen, shown while a focus request for that tab awaits its endpoint.
 pub(super) struct PreviewedTab {
@@ -153,18 +164,17 @@ impl ClientShellState {
         }
     }
 
-    /// Tabs of the active endpoint to ask screens for, so a first switch to one can preview it.
-    /// Each tab is asked for once per connection, boot and surface size.
-    pub(crate) fn take_tab_screen_requests(
+    /// The next tab of the active endpoint to ask a screen for, so a first switch to it can
+    /// preview it. Each tab is asked for once per connection, boot and surface size, and only
+    /// after the previous tab's reply arrived or timed out.
+    pub(crate) fn take_tab_screen_request(
         &mut self,
         cols: u16,
         rows: u16,
         now: std::time::Instant,
-    ) -> Vec<String> {
+    ) -> Option<String> {
         let size = self.surface_size(cols, rows);
-        let Some(snapshot) = self.snapshot.as_deref() else {
-            return Vec::new();
-        };
+        let snapshot = self.snapshot.as_deref()?;
         let previous = self.tab_screen_requests.take();
         let size_since = previous
             .as_ref()
@@ -184,12 +194,22 @@ impl ClientShellState {
                 size,
                 size_since,
                 tab_ids: HashSet::new(),
+                in_flight: None,
             });
-        if now.saturating_duration_since(size_since) < TAB_SCREEN_SIZE_SETTLE {
-            self.tab_screen_requests = Some(requests);
-            return Vec::new();
+        if requests
+            .in_flight
+            .as_ref()
+            .is_some_and(|in_flight| now >= in_flight.deadline)
+        {
+            requests.in_flight = None;
         }
-        let mut wanted = Vec::new();
+        if requests.in_flight.is_some()
+            || now.saturating_duration_since(size_since) < TAB_SCREEN_SIZE_SETTLE
+        {
+            self.tab_screen_requests = Some(requests);
+            return None;
+        }
+        let mut wanted = None;
         for tab in &snapshot.tabs {
             if snapshot.focused_tab_id.as_ref() == Some(&tab.tab_id)
                 || requests.tab_ids.contains(&tab.tab_id)
@@ -205,22 +225,34 @@ impl ClientShellState {
                         && (surface.frame.width, surface.frame.height) == (size.cols, size.rows)
                 });
             if !remembered {
-                wanted.push(tab.tab_id.clone());
+                requests.in_flight = Some(InFlightTabScreen {
+                    tab_id: tab.tab_id.clone(),
+                    deadline: now + TAB_SCREEN_REPLY_TIMEOUT,
+                });
+                wanted = Some(tab.tab_id.clone());
+                break;
             }
         }
         self.tab_screen_requests = Some(requests);
         wanted
     }
 
-    /// When the surface size settles enough to ask for tab screens, if it has not yet.
+    /// The next moment tab screen prefetch can make progress without other input: the surface
+    /// size settling, or the in-flight reply timing out.
     pub(super) fn tab_screen_request_deadline(
         &self,
         now: std::time::Instant,
     ) -> Option<std::time::Instant> {
-        self.tab_screen_requests
+        let requests = self.tab_screen_requests.as_ref()?;
+        let settled = requests.size_since + TAB_SCREEN_SIZE_SETTLE;
+        requests
+            .in_flight
             .as_ref()
-            .map(|requests| requests.size_since + TAB_SCREEN_SIZE_SETTLE)
+            .map(|in_flight| in_flight.deadline)
+            .into_iter()
+            .chain([settled])
             .filter(|deadline| *deadline > now)
+            .min()
     }
 
     /// Remembers a tab screen the endpoint rendered on request, unless it is stale or the client
@@ -231,6 +263,22 @@ impl ClientShellState {
         tab_id: String,
         surface: PaneSurfaceFrame,
     ) {
+        // A reply to an earlier request, from before a resize or reboot, must not end the wait
+        // for the request that replaced it.
+        if let Some(requests) = self.tab_screen_requests.as_mut().filter(|requests| {
+            &requests.endpoint_id == endpoint_id
+                && requests.boot_id == surface.boot_id
+                && (requests.size.cols, requests.size.rows)
+                    == (surface.frame.width, surface.frame.height)
+        }) {
+            if requests
+                .in_flight
+                .as_ref()
+                .is_some_and(|in_flight| in_flight.tab_id == tab_id)
+            {
+                requests.in_flight = None;
+            }
+        }
         let Some((cols, rows)) = self.last_composed_size else {
             return;
         };

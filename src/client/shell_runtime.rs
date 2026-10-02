@@ -95,7 +95,7 @@ pub(super) fn client_shell_resize_message(
     }
 }
 
-/// Asks the presenting endpoint for screens of tabs the client could not preview yet.
+/// Asks the presenting endpoint for the screen of the next tab the client could not preview yet.
 pub(super) fn request_tab_screens(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
@@ -114,13 +114,16 @@ pub(super) fn request_tab_screens(
     }) else {
         return;
     };
-    let tab_ids = shell.take_tab_screen_requests(
+    let tab_id = shell.take_tab_screen_request(
         state.reported_size.0,
         state.reported_size.1,
         std::time::Instant::now(),
     );
-    if !tab_ids.is_empty() {
-        endpoints.send_to(&endpoint_id, &protocol::tab_screens::request(&tab_ids));
+    if let Some(tab_id) = tab_id {
+        endpoints.send_to(
+            &endpoint_id,
+            &protocol::tab_screens::request(std::slice::from_ref(&tab_id)),
+        );
     }
 }
 
