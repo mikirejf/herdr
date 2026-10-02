@@ -21,6 +21,8 @@ pub(crate) enum ClientRenderState {
         surface_delta: bool,
         surface_scroll: bool,
         recompute_pending: bool,
+        /// `Some` once the client accepts per-tab baselines.
+        tab_baselines: Option<TabBaselines>,
     },
     /// Terminal-ANSI clients keep a terminal diff encoder and sequence number.
     TerminalAnsi {
@@ -40,6 +42,7 @@ impl ClientRenderState {
                 surface_delta: false,
                 surface_scroll: false,
                 recompute_pending: false,
+                tab_baselines: None,
             },
             RenderEncoding::TerminalAnsi => Self::TerminalAnsi {
                 blit_encoder: BlitEncoder::new(),
@@ -64,6 +67,12 @@ impl ClientRenderState {
     pub(crate) fn enable_surface_scroll(&mut self, enabled: bool) {
         if let Self::Semantic { surface_scroll, .. } = self {
             *surface_scroll = enabled;
+        }
+    }
+
+    pub(crate) fn enable_surface_tab_baselines(&mut self, enabled: bool) {
+        if let Self::Semantic { tab_baselines, .. } = self {
+            *tab_baselines = enabled.then(TabBaselines::default);
         }
     }
 
@@ -92,7 +101,7 @@ impl ClientRenderState {
 
     pub(crate) fn reset_baseline(&mut self) {
         match self {
-            Self::Semantic { last_surface, .. } => *last_surface = None,
+            Self::Semantic { .. } => self.forget_surface(),
             Self::TerminalAnsi {
                 blit_encoder,
                 repaint_pending,
@@ -106,10 +115,25 @@ impl ClientRenderState {
 
     pub(crate) fn request_repaint(&mut self) {
         match self {
-            Self::Semantic { last_surface, .. } => *last_surface = None,
+            Self::Semantic { .. } => self.forget_surface(),
             Self::TerminalAnsi {
                 repaint_pending, ..
             } => *repaint_pending = true,
+        }
+    }
+
+    /// The client may still hold parked baselines; the next switch's `keep` drops them.
+    fn forget_surface(&mut self) {
+        if let Self::Semantic {
+            last_surface,
+            tab_baselines,
+            ..
+        } = self
+        {
+            *last_surface = None;
+            if let Some(tab_baselines) = tab_baselines {
+                *tab_baselines = TabBaselines::default();
+            }
         }
     }
 
@@ -153,6 +177,24 @@ impl ClientRenderState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn parked_revisions(&self) -> Vec<u64> {
+        let Self::Semantic {
+            tab_baselines: Some(tab_baselines),
+            ..
+        } = self
+        else {
+            return Vec::new();
+        };
+        let mut revisions: Vec<u64> = tab_baselines
+            .parked
+            .iter()
+            .map(|(_, parked)| parked.surface_revision)
+            .collect();
+        revisions.sort_unstable();
+        revisions
+    }
+
     pub(crate) fn last_pane_surface(&self) -> Option<&PaneSurfaceFrame> {
         match self {
             Self::Semantic { last_surface, .. } => last_surface.as_deref(),
@@ -165,12 +207,14 @@ impl ClientRenderState {
         &mut self,
         surface: PaneSurfaceFrame,
     ) -> Option<PreparedRender> {
-        self.prepare_pane_surface_with_file(surface, false)
+        self.prepare_pane_surface_with_file(surface, None, false)
     }
 
+    /// `tab` is the tab `surface` shows; `None` means the tab of the last surface.
     pub(crate) fn prepare_pane_surface_with_file(
         &mut self,
         mut surface: PaneSurfaceFrame,
+        tab: Option<&str>,
         has_file_upload: bool,
     ) -> Option<PreparedRender> {
         let Self::Semantic {
@@ -179,6 +223,7 @@ impl ClientRenderState {
             surface_reuse,
             surface_delta,
             recompute_pending,
+            tab_baselines,
             ..
         } = self
         else {
@@ -205,6 +250,24 @@ impl ClientRenderState {
         let committed_surface = surface.clone();
         surface.graphics.assets = assets;
         let mut message = ServerMessage::PaneSurface(surface);
+        let tab_baselines = tab_baselines.as_ref();
+        let changed_tab = tab.filter(|tab| {
+            tab_baselines.is_some_and(|baselines| baselines.tab.as_deref() != Some(*tab))
+        });
+        if let (Some(tab), Some(baselines), Some(last)) =
+            (changed_tab, tab_baselines, last_surface.as_deref())
+        {
+            if baselines.tab.is_some() {
+                let (switch, delta) = baselines.switch(last, tab, &mut message);
+                return Some(PreparedRender::Semantic {
+                    message: delta.unwrap_or(message),
+                    committed_surface: Box::new(committed_surface),
+                    queued_graphics_assets,
+                    changed_tab: Some(tab.to_owned()),
+                    switch: Some(switch),
+                });
+            }
+        }
         let delta = (*surface_delta)
             .then_some(last_surface.as_deref())
             .flatten()
@@ -238,6 +301,8 @@ impl ClientRenderState {
             message: delta.or(reused).unwrap_or(message),
             committed_surface: Box::new(committed_surface),
             queued_graphics_assets,
+            changed_tab: changed_tab.map(str::to_owned),
+            switch: None,
         })
     }
 
@@ -288,15 +353,22 @@ impl ClientRenderState {
                     last_surface,
                     surface_revision,
                     recompute_pending,
+                    tab_baselines,
                     ..
                 },
                 PreparedRender::Semantic {
-                    committed_surface, ..
+                    committed_surface,
+                    changed_tab,
+                    switch,
+                    ..
                 },
             ) => {
                 *surface_revision = committed_surface.surface_revision;
-                *last_surface = Some(committed_surface);
+                let outgoing = last_surface.replace(committed_surface);
                 *recompute_pending = false;
+                if let Some(tab_baselines) = tab_baselines {
+                    tab_baselines.commit(outgoing, changed_tab, switch.map(|switch| switch.keep));
+                }
             }
             (
                 Self::Semantic {
@@ -360,6 +432,85 @@ pub(super) fn apply_pane_surface_patch(surface: &mut PaneSurfaceFrame, patch: &P
     surface.surface_revision = patch.surface_revision;
 }
 
+/// Server side of per-tab baselines. Every change to `parked` happens at commit, mirroring a
+/// switch message the client decodes, so both ends hold the same revisions.
+#[derive(Default)]
+pub(crate) struct TabBaselines {
+    /// The tab the committed surface shows.
+    tab: Option<String>,
+    /// Oldest first, at most one per tab, never `tab`: a switch to a tab drops its entry.
+    parked: Vec<(String, Box<PaneSurfaceFrame>)>,
+}
+
+impl TabBaselines {
+    /// A switch to `tab` that parks `last`, plus a delta against `tab`'s parked surface when
+    /// that is smaller than `full`.
+    fn switch(
+        &self,
+        last: &PaneSurfaceFrame,
+        tab: &str,
+        full: &mut ServerMessage,
+    ) -> (Box<PreparedSwitch>, Option<ServerMessage>) {
+        use crate::protocol::surface_switch::{self, SurfaceSwitch};
+        let ServerMessage::PaneSurface(surface) = &*full else {
+            unreachable!("a switch starts from a full surface");
+        };
+        let fits = |parked: &PaneSurfaceFrame| {
+            parked.boot_id == surface.boot_id
+                && parked.frame.width == surface.frame.width
+                && parked.frame.height == surface.frame.height
+        };
+        let mut keep: Vec<u64> = self
+            .parked
+            .iter()
+            .filter(|(parked_tab, parked)| parked_tab != tab && fits(parked))
+            .map(|(_, parked)| parked.surface_revision)
+            .chain(fits(last).then_some(last.surface_revision))
+            .collect();
+        keep.drain(..keep.len().saturating_sub(surface_switch::MAX_PARKED));
+        let restored = self
+            .parked
+            .iter()
+            .find(|(parked_tab, _)| parked_tab == tab)
+            .and_then(|(_, base)| {
+                crate::protocol::surface_delta::message(base, full)
+                    .map_err(|error| tracing::warn!(%error, "failed to encode surface delta"))
+                    .ok()
+                    .flatten()
+                    .map(|delta| (base.surface_revision, delta))
+            });
+        let (restore, delta) = restored.unzip();
+        let header = surface_switch::message(&SurfaceSwitch {
+            keep: keep.clone(),
+            restore,
+        });
+        (Box::new(PreparedSwitch { header, keep }), delta)
+    }
+
+    fn commit(
+        &mut self,
+        outgoing: Option<Box<PaneSurfaceFrame>>,
+        changed_tab: Option<String>,
+        keep: Option<Vec<u64>>,
+    ) {
+        if let Some(keep) = keep {
+            if let (Some(last_tab), Some(outgoing)) = (self.tab.take(), outgoing) {
+                self.parked.push((last_tab, outgoing));
+            }
+            self.parked
+                .retain(|(_, parked)| keep.contains(&parked.surface_revision));
+        }
+        if changed_tab.is_some() {
+            self.tab = changed_tab;
+        }
+    }
+}
+
+pub(crate) struct PreparedSwitch {
+    header: ServerMessage,
+    keep: Vec<u64>,
+}
+
 fn insert_graphics_before_sync_end(encoded: &mut Vec<u8>, graphics: &[u8]) {
     if graphics.is_empty() {
         return;
@@ -378,6 +529,10 @@ pub(crate) enum PreparedRender {
         message: ServerMessage,
         committed_surface: Box<PaneSurfaceFrame>,
         queued_graphics_assets: Vec<SurfaceGraphicsAssetKey>,
+        /// The tab `committed_surface` shows, when that differs from the last committed tab.
+        changed_tab: Option<String>,
+        /// A switch header that the writer must send right before `message`.
+        switch: Option<Box<PreparedSwitch>>,
     },
     SemanticPatch {
         message: ServerMessage,
@@ -392,6 +547,17 @@ pub(crate) enum PreparedRender {
 }
 
 impl PreparedRender {
+    /// A frame that must precede `message()` in the same write.
+    pub(crate) fn switch_header(&self) -> Option<&ServerMessage> {
+        match self {
+            Self::Semantic {
+                switch: Some(switch),
+                ..
+            } => Some(&switch.header),
+            _ => None,
+        }
+    }
+
     pub(crate) fn message(&self) -> &ServerMessage {
         match self {
             Self::Semantic { message, .. }
@@ -815,10 +981,10 @@ mod tests {
             state.commit_sent_frame(first);
             assert!(state.prepare_pane_surface(surface.clone()).is_none());
             let file = state
-                .prepare_pane_surface_with_file(surface.clone(), true)
+                .prepare_pane_surface_with_file(surface.clone(), None, true)
                 .unwrap();
             let retry = state
-                .prepare_pane_surface_with_file(surface.clone(), true)
+                .prepare_pane_surface_with_file(surface.clone(), None, true)
                 .unwrap();
             let config = bincode::config::standard();
             assert_eq!(
@@ -861,5 +1027,377 @@ mod tests {
         ));
         state.commit_sent_frame(prepared);
         assert_eq!(state.last_pane_surface().unwrap().surface_revision, 2);
+    }
+
+    mod tab_baselines {
+        use super::*;
+        use crate::protocol::surface_reuse::Decoder;
+        use crate::protocol::surface_switch::{self, SurfaceSwitch};
+
+        fn connection(tab_baselines: bool) -> (ClientRenderState, Decoder) {
+            let mut state = ClientRenderState::new(RenderEncoding::SemanticFrame);
+            state.enable_surface_reuse(true);
+            state.enable_surface_delta(true);
+            state.enable_surface_tab_baselines(tab_baselines);
+            (
+                state,
+                Decoder::new(true, false).with_tab_baselines(tab_baselines),
+            )
+        }
+
+        /// A 77-row surface of varied text, so compression sizes resemble a busy agent pane.
+        fn text_surface(name: &str, width: u16) -> PaneSurfaceFrame {
+            let mut seed = name
+                .bytes()
+                .fold(7u64, |seed, byte| seed * 31 + u64::from(byte));
+            let lines: Vec<String> = (0..77)
+                .map(|_| {
+                    (0..width)
+                        .map(|_| {
+                            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            b"etaoin shrdlu cmfwyp"[(seed >> 59) as usize % 20] as char
+                        })
+                        .collect()
+                })
+                .collect();
+            let buffer = ratatui::buffer::Buffer::with_lines(lines);
+            let mut surface = popup_surface("popup");
+            surface.popup = None;
+            surface.frame = FrameData::from_ratatui_buffer(&buffer, None);
+            surface
+        }
+
+        fn change_line(surface: &mut PaneSurfaceFrame, y: usize, text: &str) {
+            let width = usize::from(surface.frame.width);
+            for (cell, symbol) in surface.frame.cells[y * width..]
+                .iter_mut()
+                .zip(text.chars())
+            {
+                cell.symbol = symbol.to_string();
+            }
+        }
+
+        fn header(prepared: &PreparedRender) -> Option<SurfaceSwitch> {
+            prepared.switch_header().map(|header| {
+                let ServerMessage::EndpointControl { kind, data } = header else {
+                    panic!("switch header is an endpoint control");
+                };
+                assert_eq!(kind, surface_switch::MESSAGE_KIND);
+                surface_switch::decode(data).unwrap()
+            })
+        }
+
+        /// The bytes of one prepared render as the writer sends them.
+        fn written(prepared: &PreparedRender) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for message in prepared
+                .switch_header()
+                .into_iter()
+                .chain([prepared.message()])
+            {
+                crate::protocol::write_message(&mut bytes, message).unwrap();
+            }
+            bytes
+        }
+
+        fn deflated(bytes: &[u8]) -> usize {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            std::io::Write::write_all(&mut encoder, bytes).unwrap();
+            encoder.finish().unwrap().len()
+        }
+
+        /// Reads every frame of one write like the client reader and returns the one surface.
+        fn receive(decoder: &mut Decoder, bytes: &[u8]) -> Result<PaneSurfaceFrame, String> {
+            let mut reader = bytes;
+            let mut surfaces = Vec::new();
+            while !reader.is_empty() {
+                let message = crate::protocol::read_message(
+                    &mut reader,
+                    crate::protocol::MAX_GRAPHICS_FRAME_SIZE,
+                )
+                .unwrap();
+                if let Some(message) = decoder.decode_frame(message)? {
+                    surfaces.push(message);
+                }
+            }
+            match surfaces.as_slice() {
+                [ServerMessage::PaneSurface(surface)] => Ok(surface.clone()),
+                other => panic!("expected one surface, got {other:?}"),
+            }
+        }
+
+        struct Sent {
+            bytes: Vec<u8>,
+            switch: Option<SurfaceSwitch>,
+            body: ServerMessage,
+        }
+
+        /// Sends one surface for `tab` through the wire and checks both ends stay in lockstep.
+        fn send(
+            state: &mut ClientRenderState,
+            decoder: &mut Decoder,
+            surface: &PaneSurfaceFrame,
+            tab: &str,
+        ) -> Sent {
+            let mut surface = surface.clone();
+            surface.projection_revision += 1;
+            let prepared = state
+                .prepare_pane_surface_with_file(surface, Some(tab), false)
+                .expect("changed surface");
+            let bytes = written(&prepared);
+            let decoded = receive(decoder, &bytes).unwrap();
+            let sent = Sent {
+                bytes,
+                switch: header(&prepared),
+                body: prepared.message().clone(),
+            };
+            state.commit_sent_frame(prepared);
+            assert_eq!(Some(&decoded), state.last_pane_surface());
+            assert_eq!(decoder.parked_revisions(), state.parked_revisions());
+            sent
+        }
+
+        fn is_delta(message: &ServerMessage) -> bool {
+            matches!(message, ServerMessage::EndpointControl { kind, .. }
+                if kind == crate::protocol::surface_delta::MESSAGE_KIND)
+        }
+
+        #[test]
+        fn returning_to_a_tab_sends_a_delta_against_its_parked_surface() {
+            let (mut state, mut decoder) = connection(true);
+            let mut a = text_surface("alpha", 310);
+            a.popup = popup_surface("popup").popup;
+            let b = text_surface("beta", 310);
+
+            let first = send(&mut state, &mut decoder, &a, "a");
+            assert!(first.switch.is_none());
+            assert!(matches!(first.body, ServerMessage::PaneSurface(_)));
+            let away = send(&mut state, &mut decoder, &b, "b");
+            assert_eq!(
+                away.switch,
+                Some(SurfaceSwitch {
+                    keep: vec![1],
+                    restore: None
+                })
+            );
+            assert!(matches!(away.body, ServerMessage::PaneSurface(_)));
+
+            change_line(&mut a, 40, "a new line of agent output");
+            a.popup.as_mut().unwrap().frame.cells[0].symbol = "x".into();
+            let back = send(&mut state, &mut decoder, &a, "a");
+            assert_eq!(
+                back.switch,
+                Some(SurfaceSwitch {
+                    keep: vec![2],
+                    restore: Some(1)
+                })
+            );
+            assert!(is_delta(&back.body));
+            assert!(back.bytes.len() * 20 < first.bytes.len());
+
+            let mut plain = Vec::new();
+            crate::protocol::write_message(&mut plain, &away.body).unwrap();
+            assert!(away.bytes.len() < plain.len() + 100);
+            eprintln!(
+                "310x77 framed bytes, raw / deflated: full surface {} / {}, \
+                 first-visit switch {} / {}, return switch {} / {}",
+                plain.len(),
+                deflated(&plain),
+                away.bytes.len(),
+                deflated(&away.bytes),
+                back.bytes.len(),
+                deflated(&back.bytes),
+            );
+            send(&mut state, &mut decoder, &b, "b");
+        }
+
+        #[test]
+        fn a_discarded_switch_leaves_both_ends_in_lockstep() {
+            let (mut state, mut decoder) = connection(true);
+            let a = text_surface("alpha", 120);
+            let b = text_surface("beta", 120);
+            send(&mut state, &mut decoder, &a, "a");
+            let discarded = state
+                .prepare_pane_surface_with_file(b.clone(), Some("b"), false)
+                .unwrap();
+            assert!(discarded.switch_header().is_some());
+            drop(discarded);
+            assert!(state.parked_revisions().is_empty());
+            send(&mut state, &mut decoder, &b, "b");
+            let back = send(&mut state, &mut decoder, &a, "a");
+            assert_eq!(back.switch.unwrap().restore, Some(1));
+        }
+
+        #[test]
+        fn a_size_change_drops_parked_surfaces_of_the_old_size() {
+            let (mut state, mut decoder) = connection(true);
+            send(&mut state, &mut decoder, &text_surface("alpha", 120), "a");
+            send(&mut state, &mut decoder, &text_surface("beta", 120), "b");
+            let back = send(&mut state, &mut decoder, &text_surface("alpha", 100), "a");
+            assert_eq!(
+                back.switch,
+                Some(SurfaceSwitch {
+                    keep: Vec::new(),
+                    restore: None
+                })
+            );
+            assert!(matches!(back.body, ServerMessage::PaneSurface(_)));
+        }
+
+        #[test]
+        fn a_repaint_forgets_parked_surfaces_before_the_next_switch() {
+            let (mut state, mut decoder) = connection(true);
+            let a = text_surface("alpha", 120);
+            let b = text_surface("beta", 120);
+            send(&mut state, &mut decoder, &a, "a");
+            send(&mut state, &mut decoder, &b, "b");
+            state.request_repaint();
+            assert!(state.parked_revisions().is_empty());
+            // The client keeps revision 1 until a switch tells it otherwise.
+            let prepared = state
+                .prepare_pane_surface_with_file(b.clone(), Some("b"), false)
+                .unwrap();
+            assert!(prepared.switch_header().is_none());
+            assert!(matches!(prepared.message(), ServerMessage::PaneSurface(_)));
+            receive(&mut decoder, &written(&prepared)).unwrap();
+            state.commit_sent_frame(prepared);
+            assert_eq!(decoder.parked_revisions(), vec![1]);
+            let away = send(&mut state, &mut decoder, &a, "a");
+            assert_eq!(
+                away.switch,
+                Some(SurfaceSwitch {
+                    keep: vec![3],
+                    restore: None
+                })
+            );
+            let back = send(&mut state, &mut decoder, &b, "b");
+            assert_eq!(back.switch.unwrap().restore, Some(3));
+        }
+
+        #[test]
+        fn parked_surfaces_are_bounded_on_both_ends() {
+            let (mut state, mut decoder) = connection(true);
+            for tab in 0..surface_switch::MAX_PARKED + 4 {
+                let name = format!("tab{tab}");
+                send(&mut state, &mut decoder, &text_surface(&name, 80), &name);
+            }
+            assert_eq!(state.parked_revisions().len(), surface_switch::MAX_PARKED);
+            let newest = send(
+                &mut state,
+                &mut decoder,
+                &text_surface("tab10", 80),
+                "tab10",
+            );
+            assert_eq!(newest.switch.unwrap().restore, Some(11));
+            let evicted = send(&mut state, &mut decoder, &text_surface("tab0", 80), "tab0");
+            assert_eq!(evicted.switch.unwrap().restore, None);
+        }
+
+        #[test]
+        fn a_switch_with_inline_assets_keeps_its_surface_trimmable() {
+            let (mut state, mut decoder) = connection(true);
+            send(&mut state, &mut decoder, &text_surface("alpha", 80), "a");
+            let mut b = text_surface("beta", 80);
+            b.graphics
+                .assets
+                .push(crate::protocol::SurfaceGraphicsAsset {
+                    key: crate::protocol::SurfaceGraphicsAssetKey {
+                        source: crate::protocol::SurfaceGraphicsSource::PaneLayer {
+                            pane_id: "w1:p1".into(),
+                            layer_id: "image".into(),
+                        },
+                        image_width: 1,
+                        image_height: 1,
+                        format: crate::protocol::SurfaceGraphicsFormat::Rgba,
+                        data_len: 4,
+                        data_fingerprint: 1,
+                    },
+                    data: vec![0, 128, 255, 255],
+                });
+            let mut prepared = state
+                .prepare_pane_surface_with_file(b, Some("b"), false)
+                .unwrap();
+            assert!(prepared.switch_header().is_some());
+            assert!(prepared.pop_pane_surface_asset().is_some());
+            receive(&mut decoder, &written(&prepared)).unwrap();
+            state.commit_sent_frame(prepared);
+            assert_eq!(decoder.parked_revisions(), state.parked_revisions());
+        }
+
+        #[test]
+        fn a_malformed_switch_is_rejected_without_moving_any_baseline() {
+            let (mut state, mut decoder) = connection(true);
+            let mut a = text_surface("alpha", 120);
+            let b = text_surface("beta", 120);
+            send(&mut state, &mut decoder, &a, "a");
+            send(&mut state, &mut decoder, &b, "b");
+            change_line(&mut a, 3, "changed");
+            a.projection_revision += 1;
+            let prepared = state
+                .prepare_pane_surface_with_file(a.clone(), Some("a"), false)
+                .unwrap();
+            assert!(is_delta(prepared.message()));
+            let header =
+                |keep: Vec<u64>, restore| surface_switch::message(&SurfaceSwitch { keep, restore });
+            let cases = [
+                header(vec![2], Some(7)),
+                header(vec![9], Some(1)),
+                header(vec![2, 1], Some(1)),
+                header(vec![2; surface_switch::MAX_PARKED + 1], Some(1)),
+                ServerMessage::EndpointControl {
+                    kind: surface_switch::MESSAGE_KIND.into(),
+                    data: "not-base64!".into(),
+                },
+            ];
+            for (case, bad) in cases.into_iter().enumerate() {
+                assert!(decoder.decode_frame(bad).is_err(), "case {case}");
+                assert_eq!(decoder.parked_revisions(), vec![1], "case {case}");
+            }
+            let decoded = receive(&mut decoder, &written(&prepared)).unwrap();
+            state.commit_sent_frame(prepared);
+            assert_eq!(Some(&decoded), state.last_pane_surface());
+            assert_eq!(decoder.parked_revisions(), vec![2]);
+
+            // The header must be followed by its surface, and only that surface may use the
+            // connection's latest revision instead of the restored baseline's.
+            let (mut state, mut decoder) = connection(true);
+            send(&mut state, &mut decoder, &text_surface("alpha", 120), "a");
+            send(&mut state, &mut decoder, &text_surface("beta", 120), "b");
+            assert!(decoder
+                .decode_frame(header(vec![2], Some(1)))
+                .unwrap()
+                .is_none());
+            assert!(decoder
+                .decode_frame(ServerMessage::ReloadSoundConfig)
+                .is_err());
+        }
+
+        #[test]
+        fn without_the_capability_switches_stay_ordinary_surfaces() {
+            let (mut state, mut decoder) = connection(false);
+            let a = text_surface("alpha", 120);
+            let b = text_surface("beta", 120);
+            for (surface, tab) in [(&a, "a"), (&b, "b"), (&a, "a")] {
+                assert!(send(&mut state, &mut decoder, surface, tab)
+                    .switch
+                    .is_none());
+            }
+
+            let (mut state, _) = connection(true);
+            let mut legacy = Decoder::new(true, false);
+            for (surface, tab) in [(&a, "a"), (&b, "b")] {
+                let prepared = state
+                    .prepare_pane_surface_with_file(surface.clone(), Some(tab), false)
+                    .unwrap();
+                let decoded = receive(&mut legacy, &written(&prepared));
+                assert_eq!(
+                    decoded.is_err(),
+                    tab == "b",
+                    "an old decoder rejects the header"
+                );
+                state.commit_sent_frame(prepared);
+            }
+        }
     }
 }

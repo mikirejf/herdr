@@ -82,6 +82,9 @@ pub struct EndpointClientHello {
     /// Accept the optional scroll-aware patch encoding on this connection.
     #[serde(default)]
     pub surface_scroll: bool,
+    /// Accept per-tab surface baselines on this connection.
+    #[serde(default)]
+    pub surface_tab_baselines: bool,
     #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
@@ -187,6 +190,7 @@ impl EndpointServerWelcome {
                 super::surface_reuse::CAPABILITY.into(),
                 super::surface_delta::CAPABILITY.into(),
                 super::surface_scroll::CAPABILITY.into(),
+                super::surface_switch::CAPABILITY.into(),
                 SURFACE_INTEREST_CAPABILITY.into(),
                 SURFACE_ACTIVATION_EFFECTS_CAPABILITY.into(),
                 PANE_FOCUS_STYLE_CAPABILITY.into(),
@@ -235,6 +239,7 @@ mod tests {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            surface_tab_baselines: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -385,11 +390,16 @@ mod tests {
         value.as_object_mut().unwrap().remove("surface_reuse");
         value.as_object_mut().unwrap().remove("surface_delta");
         value.as_object_mut().unwrap().remove("surface_scroll");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("surface_tab_baselines");
         let decoded: EndpointClientHello = serde_json::from_value(value).unwrap();
         assert!(decoded.surface_active);
         assert!(!decoded.surface_reuse);
         assert!(!decoded.surface_delta);
         assert!(!decoded.surface_scroll);
+        assert!(!decoded.surface_tab_baselines);
     }
 
     #[test]
@@ -401,6 +411,7 @@ mod tests {
                 super::super::surface_reuse::CAPABILITY.to_string(),
                 super::super::surface_delta::CAPABILITY.to_string(),
                 super::super::surface_scroll::CAPABILITY.to_string(),
+                super::super::surface_switch::CAPABILITY.to_string(),
                 SURFACE_INTEREST_CAPABILITY.to_string(),
                 SURFACE_ACTIVATION_EFFECTS_CAPABILITY.to_string(),
                 PANE_FOCUS_STYLE_CAPABILITY.to_string(),

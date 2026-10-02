@@ -1862,6 +1862,7 @@ impl HeadlessServer {
                 surface_reuse,
                 surface_delta,
                 surface_scroll,
+                surface_tab_baselines,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -1912,6 +1913,9 @@ impl HeadlessServer {
                 connection
                     .render_state
                     .enable_surface_scroll(surface_scroll);
+                connection
+                    .render_state
+                    .enable_surface_tab_baselines(surface_tab_baselines && surface_delta);
                 connection.shell_projection_revision = 1;
                 let config_diagnostic = if endpoint_keybindings {
                     self.server_config_diagnostic.as_deref()

@@ -786,6 +786,7 @@ impl HeadlessServer {
                             popup,
                             graphics,
                         },
+                        shell_tab_id.as_deref(),
                         native_upload.is_some(),
                     )
                 } else {
@@ -878,6 +879,19 @@ impl HeadlessServer {
                     continue;
                 }
             };
+            if let Some(header) = prepared.switch_header() {
+                let mut framed = match Self::frame_server_message(header) {
+                    Ok(framed) => framed,
+                    Err(err) => {
+                        warn!(client_id, err = %err, "failed to serialize surface switch");
+                        broken_clients.push(client_id);
+                        continue;
+                    }
+                };
+                // One write carries both frames, so the client never sees the header alone.
+                framed.append(&mut serialized);
+                serialized = framed;
+            }
             let shell_graphics_pending = !suppress_impossible_asset_retry
                 && next_shell_graphics_delivery
                     .as_ref()

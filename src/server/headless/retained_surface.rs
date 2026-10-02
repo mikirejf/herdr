@@ -517,9 +517,11 @@ impl HeadlessServer {
             // in a graphics-capable surface message rather than invoking the full renderer.
             let (prepared, graphics_delivery) = if let Some((surface, delivery, _)) = graphics {
                 (
-                    client
-                        .render_state
-                        .prepare_pane_surface_with_file(surface, native_upload.is_some()),
+                    client.render_state.prepare_pane_surface_with_file(
+                        surface,
+                        None,
+                        native_upload.is_some(),
+                    ),
                     Some(delivery),
                 )
             } else {
@@ -530,6 +532,10 @@ impl HeadlessServer {
                 deferred += 1;
                 continue;
             };
+            assert!(
+                prepared.switch_header().is_none(),
+                "a retained update keeps its tab"
+            );
             let max_frame_size = if graphics_delivery.is_some() {
                 MAX_GRAPHICS_FRAME_SIZE
             } else {

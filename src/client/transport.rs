@@ -60,14 +60,15 @@ pub(super) fn server_reader_thread(
 
         let message = protocol::read_message(&mut stream, max_frame_size).and_then(|message| {
             match &mut surface_decoder {
-                Some(decoder) => decoder.decode(message).map_err(|error| {
+                Some(decoder) => decoder.decode_frame(message).map_err(|error| {
                     protocol::FramingError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
                 }),
-                None => Ok(message),
+                None => Ok(Some(message)),
             }
         });
         match message {
-            Ok(msg) => {
+            Ok(None) => {}
+            Ok(Some(msg)) => {
                 if event_tx
                     .blocking_send(ClientLoopEvent::ServerMessage {
                         endpoint_id: endpoint_id.clone(),

@@ -2,6 +2,7 @@
 
 use super::{CellData, PaneSurfaceFrame, ServerMessage};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub(crate) const CAPABILITY: &str = "surface_reuse";
 pub(crate) const MESSAGE_KIND: &str = "endpoint.surface-reuse.v1";
@@ -84,20 +85,61 @@ fn popup_baseline(surface: &PaneSurfaceFrame) -> Option<PopupBaseline> {
 #[derive(Default)]
 pub(crate) struct Decoder {
     baseline: Option<CellBaseline>,
+    /// Baselines of tabs this connection switched away from, by surface revision.
+    parked: HashMap<u64, CellBaseline>,
     surface_delta: bool,
     surface_scroll: bool,
+    tab_baselines: bool,
+    /// The connection's latest surface revision while the previous frame was a switch header.
+    switched_from: Option<u64>,
 }
 
 impl Decoder {
     pub(crate) fn new(surface_delta: bool, surface_scroll: bool) -> Self {
         Self {
             baseline: None,
+            parked: HashMap::new(),
             surface_delta,
             surface_scroll,
+            tab_baselines: false,
+            switched_from: None,
         }
     }
 
+    /// Tab baselines build on surface deltas, so they stay off without them.
+    pub(crate) fn with_tab_baselines(mut self, enabled: bool) -> Self {
+        self.tab_baselines = enabled && self.surface_delta;
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn decode(&mut self, message: ServerMessage) -> Result<ServerMessage, String> {
+        self.decode_frame(message)?
+            .ok_or_else(|| "a surface switch header carries no message".into())
+    }
+
+    /// Decodes one wire frame. A surface switch header only moves baselines and yields nothing.
+    pub(crate) fn decode_frame(
+        &mut self,
+        message: ServerMessage,
+    ) -> Result<Option<ServerMessage>, String> {
+        // The server writes a switch header and its surface in one write, so nothing else can
+        // arrive between them.
+        let switched_from = self.switched_from.take();
+        if switched_from.is_some()
+            && !match &message {
+                ServerMessage::PaneSurface(surface) => {
+                    Some(surface.surface_revision)
+                        == switched_from.map(|latest| latest.saturating_add(1))
+                }
+                ServerMessage::EndpointControl { kind, .. } => {
+                    kind == super::surface_delta::MESSAGE_KIND
+                }
+                _ => false,
+            }
+        {
+            return Err("a surface switch header must be followed by its surface".into());
+        }
         let message = match message {
             ServerMessage::EndpointControl { kind, data }
                 if kind == super::surface_delta::MESSAGE_KIND =>
@@ -105,7 +147,18 @@ impl Decoder {
                 if !self.surface_delta {
                     return Err("surface delta was not negotiated".into());
                 }
-                return self.decode_delta(&data).map(ServerMessage::PaneSurface);
+                return self
+                    .decode_delta(&data, switched_from)
+                    .map(|surface| Some(ServerMessage::PaneSurface(surface)));
+            }
+            ServerMessage::EndpointControl { kind, data }
+                if kind == super::surface_switch::MESSAGE_KIND =>
+            {
+                if !self.tab_baselines {
+                    return Err("surface tab baselines were not negotiated".into());
+                }
+                self.decode_switch(&data)?;
+                return Ok(None);
             }
             ServerMessage::EndpointControl { kind, data }
                 if kind == super::surface_scroll::MESSAGE_KIND =>
@@ -115,7 +168,7 @@ impl Decoder {
                 }
                 return self
                     .decode_scroll(&data)
-                    .map(ServerMessage::PaneSurfacePatch);
+                    .map(|patch| Some(ServerMessage::PaneSurfacePatch(patch)));
             }
             ServerMessage::EndpointControl { kind, data } if kind == MESSAGE_KIND => {
                 let reuse: SurfaceReuse<PaneSurfaceFrame> = serde_json::from_str(&data)
@@ -139,23 +192,12 @@ impl Decoder {
                 if self.surface_delta {
                     base.popup = popup_baseline(&surface);
                 }
-                return Ok(ServerMessage::PaneSurface(surface));
+                return Ok(Some(ServerMessage::PaneSurface(surface)));
             }
             message => message,
         };
         match &message {
-            ServerMessage::PaneSurface(surface) => {
-                let base = self.baseline.get_or_insert_with(CellBaseline::default);
-                base.boot_id.clone_from(&surface.boot_id);
-                base.projection_revision = surface.projection_revision;
-                base.surface_revision = surface.surface_revision;
-                base.width = surface.frame.width;
-                base.height = surface.frame.height;
-                base.cells.clone_from(&surface.frame.cells);
-                if self.surface_delta {
-                    base.popup = popup_baseline(surface);
-                }
-            }
+            ServerMessage::PaneSurface(surface) => self.replace_baseline(surface),
             ServerMessage::PaneSurfacePatch(patch) => {
                 if let Some(base) = &mut self.baseline {
                     if !base.matches_patch(patch) {
@@ -179,7 +221,7 @@ impl Decoder {
             }
             _ => {}
         }
-        Ok(message)
+        Ok(Some(message))
     }
 
     fn decode_scroll(&mut self, data: &str) -> Result<super::PaneSurfacePatch, String> {
@@ -195,7 +237,26 @@ impl Decoder {
         Ok(patch)
     }
 
-    fn decode_delta(&mut self, data: &str) -> Result<PaneSurfaceFrame, String> {
+    fn replace_baseline(&mut self, surface: &PaneSurfaceFrame) {
+        let base = self.baseline.get_or_insert_with(CellBaseline::default);
+        base.boot_id.clone_from(&surface.boot_id);
+        base.projection_revision = surface.projection_revision;
+        base.surface_revision = surface.surface_revision;
+        base.width = surface.frame.width;
+        base.height = surface.frame.height;
+        base.cells.clone_from(&surface.frame.cells);
+        if self.surface_delta {
+            base.popup = popup_baseline(surface);
+        }
+    }
+
+    /// Right after a switch header, the restored baseline is older than the connection's
+    /// latest revision, and the delta must carry the revision after that latest one.
+    fn decode_delta(
+        &mut self,
+        data: &str,
+        switched_from: Option<u64>,
+    ) -> Result<PaneSurfaceFrame, String> {
         use super::surface_delta::{self, GridUpdate};
         let Some(base) = &mut self.baseline else {
             return Err("surface delta without a baseline".into());
@@ -205,7 +266,10 @@ impl Decoder {
         if surface.boot_id != base.boot_id
             || delta.base_projection_revision != base.projection_revision
             || delta.base_surface_revision != base.surface_revision
-            || surface.surface_revision != base.surface_revision.saturating_add(1)
+            || surface.surface_revision
+                != switched_from
+                    .unwrap_or(base.surface_revision)
+                    .saturating_add(1)
             || surface.projection_revision < base.projection_revision
             || base.cells.len() != usize::from(base.width) * usize::from(base.height)
         {
@@ -253,5 +317,45 @@ impl Decoder {
         base.projection_revision = surface.projection_revision;
         base.surface_revision = surface.surface_revision;
         Ok(surface)
+    }
+
+    /// Validates the whole header against the held baselines before any of them moves.
+    fn decode_switch(&mut self, data: &str) -> Result<(), String> {
+        let switch = super::surface_switch::decode(data)?;
+        let Some(current) = self.baseline.as_ref().map(|base| base.surface_revision) else {
+            return Err("surface switch without a current baseline".into());
+        };
+        if switch.keep.len() > super::surface_switch::MAX_PARKED
+            || switch.restore.is_some_and(|revision| {
+                !self.parked.contains_key(&revision) || switch.keep.contains(&revision)
+            })
+            || switch
+                .keep
+                .iter()
+                .any(|revision| !self.parked.contains_key(revision) && *revision != current)
+        {
+            return Err("surface switch does not match the held baselines".into());
+        }
+        self.park_current();
+        if let Some(revision) = switch.restore {
+            self.baseline = self.parked.remove(&revision);
+        }
+        self.parked
+            .retain(|revision, _| switch.keep.contains(revision));
+        self.switched_from = Some(current);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parked_revisions(&self) -> Vec<u64> {
+        let mut revisions: Vec<u64> = self.parked.keys().copied().collect();
+        revisions.sort_unstable();
+        revisions
+    }
+
+    fn park_current(&mut self) {
+        if let Some(base) = self.baseline.take() {
+            self.parked.insert(base.surface_revision, base);
+        }
     }
 }
