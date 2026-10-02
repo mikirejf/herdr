@@ -145,6 +145,30 @@ enum LoopEvent {
 enum RenderImpact {
     None,
     Full,
+    /// Only this pane's scrollback moved. The pane repaints like a dirty PTY
+    /// source, so the retained surface path can send a scroll patch.
+    PaneScroll(crate::layout::PaneId),
+}
+
+impl RenderImpact {
+    fn needs_render(self) -> bool {
+        self != Self::None
+    }
+
+    fn needs_full_render(self) -> bool {
+        self == Self::Full
+    }
+
+    /// Combines the impact of several events into what the render loop must do.
+    /// A merged `PaneScroll` loses its pane; `dispatch_server_event` already
+    /// queued each pane in the render signal.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Full, _) | (_, Self::Full) => Self::Full,
+            (Self::None, other) | (other, Self::None) => other,
+            (scroll @ Self::PaneScroll(_), Self::PaneScroll(_)) => scroll,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -471,8 +495,11 @@ impl HeadlessServer {
             self.accept_client_connections()?;
 
             // 5. Drain server events from client threads.
-            if self.drain_server_events() {
+            let server_event_impact = self.drain_server_events();
+            if server_event_impact.needs_render() {
                 needs_render = true;
+            }
+            if server_event_impact.needs_full_render() {
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.server_events");
             }
@@ -654,10 +681,9 @@ impl HeadlessServer {
                     }
                 }
                 LoopEvent::ServerEvent(ev) => {
-                    if self.handle_server_event_with_render_impact(ev) == RenderImpact::Full {
-                        needs_render = true;
-                        needs_full_render = true;
-                    }
+                    let impact = self.dispatch_server_event(ev);
+                    needs_render |= impact.needs_render();
+                    needs_full_render |= impact.needs_full_render();
                 }
                 LoopEvent::RenderRequested => {
                     if self.app.render_dirty.is_pending() {
@@ -1014,8 +1040,8 @@ impl HeadlessServer {
     }
 
     /// Drains server events from the dedicated channel.
-    fn drain_server_events(&mut self) -> bool {
-        let mut changed = false;
+    fn drain_server_events(&mut self) -> RenderImpact {
+        let mut impact = RenderImpact::None;
         for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
             if self.should_quit.load(Ordering::Acquire) {
                 break;
@@ -1023,9 +1049,9 @@ impl HeadlessServer {
             let Ok(ev) = self.server_event_rx.try_recv() else {
                 break;
             };
-            changed |= self.handle_server_event_with_render_impact(ev) == RenderImpact::Full;
+            impact = impact.merge(self.dispatch_server_event(ev));
         }
-        changed
+        impact
     }
 
     async fn reject_late_client_connections(&mut self) {
@@ -2331,89 +2357,9 @@ impl HeadlessServer {
                 client_id,
                 pane_id,
                 events,
-            } => {
-                if self.handoff_in_progress
-                    || !self
-                        .clients
-                        .get(&client_id)
-                        .is_some_and(ClientConnection::is_active_shell_client)
-                {
-                    return false;
-                }
-                let pixel_mouse = self.clients.get(&client_id).is_some_and(|client| {
-                    client.pixel_mouse && client.host_sgr_pixels_active == Some(true)
-                });
-                let mut events = events;
-                let Some((workspace_index, runtime_pane_id)) = self.app.parse_pane_id(&pane_id)
-                else {
-                    return false;
-                };
-                let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                    &self.app.terminal_runtimes,
-                    workspace_index,
-                    runtime_pane_id,
-                ) else {
-                    return false;
-                };
-                super::pane_input::downgrade_ineligible_pixel_mouse(
-                    &mut events,
-                    pixel_mouse,
-                    runtime.current_size(),
-                    runtime.pixel_size(),
-                );
-                let popup_blocks_input = self.app.state.popup_pane.is_some()
-                    && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
-                if popup_blocks_input
-                    || !self.shell_client_views_pane(client_id, workspace_index, runtime_pane_id)
-                {
-                    let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                        &self.app.terminal_runtimes,
-                        workspace_index,
-                        runtime_pane_id,
-                    ) else {
-                        return false;
-                    };
-                    let releases = events
-                        .into_iter()
-                        .filter(client_pane_input_releases_press)
-                        .collect::<Vec<_>>();
-                    if releases.is_empty() {
-                        return false;
-                    }
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.track_shell_input(
-                            ClientShellInputTarget::Pane(pane_id.clone()),
-                            &releases,
-                        );
-                    }
-                    let scroll_before = runtime.scroll_metrics();
-                    if let Err(err) = apply_client_pane_input_events(runtime, &releases) {
-                        warn!(client_id, pane_id, err = %err, "targeted client shell release failed");
-                    }
-                    return runtime.scroll_metrics() != scroll_before;
-                }
-                let interaction = client_pane_input_has_interaction(&events);
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client
-                        .track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &events);
-                }
-                let foreground_changed =
-                    interaction && self.promote_client_to_foreground(client_id);
-                let geometry_changed =
-                    interaction && self.claim_shell_tab_geometry(client_id, false);
-                let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                    &self.app.terminal_runtimes,
-                    workspace_index,
-                    runtime_pane_id,
-                ) else {
-                    return foreground_changed | geometry_changed;
-                };
-                let scroll_before = runtime.scroll_metrics();
-                if let Err(err) = apply_client_pane_input_events(runtime, &events) {
-                    warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
-                }
-                foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
-            }
+            } => self
+                .handle_client_shell_pane_input(client_id, pane_id, events)
+                .needs_render(),
             ServerEvent::ClientShellPopupInput {
                 client_id,
                 terminal_id,
@@ -2611,8 +2557,126 @@ impl HeadlessServer {
     }
 
     fn handle_server_event_with_render_impact(&mut self, ev: ServerEvent) -> RenderImpact {
-        if self.handle_server_event(ev) {
+        match ev {
+            ServerEvent::ClientShellPaneInput {
+                client_id,
+                pane_id,
+                events,
+            } => self.handle_client_shell_pane_input(client_id, pane_id, events),
+            ev => {
+                if self.handle_server_event(ev) {
+                    RenderImpact::Full
+                } else {
+                    RenderImpact::None
+                }
+            }
+        }
+    }
+
+    /// Handles an event and queues any presentation work it implies. Full
+    /// renders travel in the loop's own flags; a scrolled pane is queued as a
+    /// dirty PTY source so it reaches the retained surface path.
+    fn dispatch_server_event(&mut self, ev: ServerEvent) -> RenderImpact {
+        let impact = self.handle_server_event_with_render_impact(ev);
+        if let RenderImpact::PaneScroll(pane_id) = impact {
+            self.app.render_dirty.request_pty(pane_id);
+            self.app.render_notify.notify_one();
+        }
+        impact
+    }
+
+    fn handle_client_shell_pane_input(
+        &mut self,
+        client_id: u64,
+        pane_id: String,
+        events: Vec<protocol::ClientPaneInputEvent>,
+    ) -> RenderImpact {
+        if self.handoff_in_progress
+            || !self
+                .clients
+                .get(&client_id)
+                .is_some_and(ClientConnection::is_active_shell_client)
+        {
+            return RenderImpact::None;
+        }
+        let pixel_mouse = self.clients.get(&client_id).is_some_and(|client| {
+            client.pixel_mouse && client.host_sgr_pixels_active == Some(true)
+        });
+        let mut events = events;
+        let Some((workspace_index, runtime_pane_id)) = self.app.parse_pane_id(&pane_id) else {
+            return RenderImpact::None;
+        };
+        let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+            &self.app.terminal_runtimes,
+            workspace_index,
+            runtime_pane_id,
+        ) else {
+            return RenderImpact::None;
+        };
+        super::pane_input::downgrade_ineligible_pixel_mouse(
+            &mut events,
+            pixel_mouse,
+            runtime.current_size(),
+            runtime.pixel_size(),
+        );
+        let popup_blocks_input = self.app.state.popup_pane.is_some()
+            && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
+        if popup_blocks_input
+            || !self.shell_client_views_pane(client_id, workspace_index, runtime_pane_id)
+        {
+            let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                &self.app.terminal_runtimes,
+                workspace_index,
+                runtime_pane_id,
+            ) else {
+                return RenderImpact::None;
+            };
+            let releases = events
+                .into_iter()
+                .filter(client_pane_input_releases_press)
+                .collect::<Vec<_>>();
+            if releases.is_empty() {
+                return RenderImpact::None;
+            }
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &releases);
+            }
+            let scroll_before = runtime.scroll_metrics();
+            if let Err(err) = apply_client_pane_input_events(runtime, &releases) {
+                warn!(client_id, pane_id, err = %err, "targeted client shell release failed");
+            }
+            return if runtime.scroll_metrics() != scroll_before {
+                RenderImpact::Full
+            } else {
+                RenderImpact::None
+            };
+        }
+        let interaction = client_pane_input_has_interaction(&events);
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &events);
+        }
+        let foreground_changed = interaction && self.promote_client_to_foreground(client_id);
+        let geometry_changed = interaction && self.claim_shell_tab_geometry(client_id, false);
+        let presentation_changed = foreground_changed | geometry_changed;
+        let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+            &self.app.terminal_runtimes,
+            workspace_index,
+            runtime_pane_id,
+        ) else {
+            return if presentation_changed {
+                RenderImpact::Full
+            } else {
+                RenderImpact::None
+            };
+        };
+        let scroll_before = runtime.scroll_metrics();
+        if let Err(err) = apply_client_pane_input_events(runtime, &events) {
+            warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
+        }
+        if presentation_changed {
             RenderImpact::Full
+        } else if runtime.scroll_metrics() != scroll_before {
+            RenderImpact::PaneScroll(runtime_pane_id)
         } else {
             RenderImpact::None
         }

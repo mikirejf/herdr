@@ -283,7 +283,7 @@ fn server_stop_interrupts_server_event_backlog() {
 
     server.should_quit.store(true, Ordering::Release);
 
-    assert!(!server.drain_server_events());
+    assert_eq!(server.drain_server_events(), RenderImpact::None);
     assert!(server.server_event_rx.try_recv().is_ok());
     shutdown_test_runtimes(&mut server);
 }
@@ -3331,7 +3331,9 @@ async fn client_shell_release_under_popup_renders_when_it_resets_scrollback() {
             }],
         });
 
-    assert_eq!(render_impact, RenderImpact::Full);
+    // The popup makes the retained path decline, so the loop renders in full.
+    assert_eq!(render_impact, RenderImpact::PaneScroll(pane_id));
+    assert!(!server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
     assert!(!input_rx.recv().await.expect("encoded release").is_empty());
     shutdown_test_runtimes(&mut server);
 }
@@ -3744,12 +3746,29 @@ fn retained_test_server_with_control(
     std::sync::mpsc::Receiver<Vec<u8>>,
     crate::layout::PaneId,
 ) {
+    retained_test_server_with_scrollback(initial_screen, 0)
+}
+
+fn retained_test_server_with_scrollback(
+    initial_screen: &[u8],
+    scrollback_limit_bytes: usize,
+) -> (
+    HeadlessServer,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    crate::layout::PaneId,
+) {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("test");
     let pane_id = workspace.focused_pane_id().expect("focused pane");
     workspace.insert_test_runtime(
         pane_id,
-        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, initial_screen),
+        crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+            80,
+            24,
+            scrollback_limit_bytes,
+            initial_screen,
+        ),
     );
     server.app.state.workspaces = vec![workspace];
     server.app.state.active = Some(0);
