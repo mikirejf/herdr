@@ -1274,7 +1274,8 @@ async fn two_headless_servers_return_to_a_background_remote_without_a_round_trip
             ServerMessage::ClientShellKeyboardReportAll { enabled: false },
         ],
     )
-    .expect("the followed remote surface commits at once");
+    .expect("the followed remote surface commits at once")
+    .committed;
     assert_eq!(endpoints.active_id(), &remote_id);
     let server_surface = remote_server.clients[&7]
         .render_state

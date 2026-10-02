@@ -88,7 +88,9 @@ impl BackgroundSurface {
     }
 
     /// The kept surface and host modes, when the surface proves the endpoint's current
-    /// presentation for this geometry and navigation target. Otherwise, the checks that failed.
+    /// presentation for this geometry, and whether the navigation target still needs a focus
+    /// request. A surface that does not show the target qualifies only when the shell can show
+    /// the target at once after presenting it. Otherwise, the checks that failed.
     pub(super) fn presentable(
         &self,
         shell: &crate::client::shell::ClientShellState,
@@ -96,7 +98,7 @@ impl BackgroundSurface {
         generation: u64,
         resize: &ClientMessage,
         focus: Option<&crate::client::shell::ClientEndpointFocusTarget>,
-    ) -> Result<(&PaneSurfaceFrame, &[ServerMessage]), BackgroundMiss> {
+    ) -> Result<(&PaneSurfaceFrame, &[ServerMessage], bool), BackgroundMiss> {
         let mut miss = BackgroundMiss::default();
         let Some(surface) = self.evidence.surface.as_ref() else {
             miss.surface = true;
@@ -135,8 +137,15 @@ impl BackgroundSurface {
                         .any(|pane| pane.focused && &pane.pane_id == id)
             }
         };
-        if miss == BackgroundMiss::default() {
-            Ok((surface, effects))
+        let previews_focus =
+            miss == BackgroundMiss {
+                focus: true,
+                ..BackgroundMiss::default()
+            } && focus.is_some_and(|target| {
+                shell.can_preview_focus_target(endpoint_id, generation, surface, target)
+            });
+        if miss == BackgroundMiss::default() || previews_focus {
+            Ok((surface, effects, miss.focus))
         } else {
             Err(miss)
         }

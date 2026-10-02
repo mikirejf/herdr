@@ -93,6 +93,15 @@ fn source_background(
     })
 }
 
+/// A background endpoint presented at once.
+#[derive(Debug)]
+pub(crate) struct WarmCommit {
+    pub(crate) committed: CommittedActivation,
+    /// The navigation target the presented surface does not show yet. The shell can show it from
+    /// a focus request alone, which the runtime makes before composing the first frame.
+    pub(crate) focus: Option<crate::client::shell::ClientEndpointFocusTarget>,
+}
+
 /// Present a background endpoint's kept surface at once, then tell the endpoint it presents
 /// again. Returns why not, with the presentation unchanged, when the kept surface cannot be proven
 /// current or the endpoint cannot be reached; the caller then runs a full activation, which also
@@ -105,17 +114,18 @@ pub(crate) fn present_background_surface(
     resize: &crate::protocol::ClientMessage,
     serial: u64,
     source_modes: [crate::protocol::ServerMessage; 2],
-) -> Result<CommittedActivation, WarmPathMiss> {
+) -> Result<WarmCommit, WarmPathMiss> {
     let generation = endpoints
         .connection(target)
         .ok_or(WarmPathMiss::NotKept)?
         .generation;
-    let (surface, effects) = endpoints
+    let (surface, effects, focus_owed) = endpoints
         .background_surface(target)
         .ok_or(WarmPathMiss::NotKept)?
         .presentable(shell, target, generation, resize, focus)
         .map_err(WarmPathMiss::Unpresentable)?;
     let (surface, effects) = (surface.clone(), effects.to_vec());
+    let focus = focus.filter(|_| focus_owed).cloned();
     let source_id = endpoints.active_id().clone();
     let source = endpoints
         .connection(&source_id)
@@ -157,17 +167,22 @@ pub(crate) fn present_background_surface(
         endpoints.set_active(target),
         "a sent-to endpoint stays connected"
     );
-    assert!(
-        shell.activate_endpoint_projection(target),
-        "a presentable endpoint has a snapshot"
-    );
+    let activated = if focus.is_some() {
+        shell.activate_endpoint_projection_keeping_size(target)
+    } else {
+        shell.activate_endpoint_projection(target)
+    };
+    assert!(activated, "a presentable endpoint has a snapshot");
     shell.set_pane_surface(surface);
-    Ok(CommittedActivation {
-        completion: ActivationCompletion::Activated,
-        endpoint_id: target.clone(),
-        generation,
-        effects,
-        input: Vec::new(),
+    Ok(WarmCommit {
+        committed: CommittedActivation {
+            completion: ActivationCompletion::Activated,
+            endpoint_id: target.clone(),
+            generation,
+            effects,
+            input: Vec::new(),
+        },
+        focus,
     })
 }
 

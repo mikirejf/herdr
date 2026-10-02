@@ -1146,3 +1146,240 @@ fn rejected_pane_focus_drops_the_cross_tab_preview() {
     assert_eq!(shown_screen(&mut state).as_deref(), Some("SCREEN tab_1"));
     assert_eq!(typed_pane(&mut state), "pane_1");
 }
+
+/// Leaves the endpoint `state` presents for a remote, as a switch does. Returns the surface the
+/// left endpoint keeps streaming in the background.
+fn leave_for_remote(state: &mut ClientShellState) -> PaneSurfaceFrame {
+    let kept = state.pane_surface.clone().expect("presented surface");
+    let profile = crate::client::endpoint::SavedSshEndpoint {
+        id: crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        label: "Build".into(),
+        target: "dev@build.example".into(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    let mut projected = tabs_snapshot("tab_1", 1);
+    projected.boot_id = "remote-boot".into();
+    state.set_endpoint_snapshot(&remote, Box::new(projected));
+    assert!(state.activate_endpoint_projection(&remote));
+    let mut shown = tab_surface(COLS, ROWS, "tab_1", 1);
+    shown.boot_id = "remote-boot".into();
+    state.set_pane_surface(shown);
+    state.compose(COLS, ROWS).expect("remote frame");
+    kept
+}
+
+/// Returns to Local the way a warm switch does: asks whether `target` can be shown at once,
+/// presents the kept surface, then requests the target. Returns the answer.
+fn return_warm(
+    state: &mut ClientShellState,
+    kept: PaneSurfaceFrame,
+    target: ClientEndpointFocusTarget,
+) -> bool {
+    let previews = state.can_preview_focus_target(&ClientEndpointId::Local, 0, &kept, &target);
+    assert!(state.activate_endpoint_projection_keeping_size(&ClientEndpointId::Local));
+    state.set_pane_surface(kept);
+    state.focus_endpoint_target(target);
+    previews
+}
+
+/// `give_pane_focus_style`, kept in the endpoint's cached snapshot too.
+fn cache_pane_focus_style(state: &mut ClientShellState) {
+    give_pane_focus_style(state);
+    let styled = state.snapshot.clone().expect("presented snapshot");
+    state.set_snapshot(styled);
+}
+
+/// Splits the presented `tab_1` so it also shows an unfocused `pane_1b`.
+fn with_second_pane_in_tab_1(state: &mut ClientShellState) {
+    let mut projected = state.snapshot.clone().expect("presented snapshot");
+    let mut second = projected
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .cloned()
+        .expect("pane_1");
+    second.pane_id = "pane_1b".into();
+    second.focused = false;
+    projected.panes.push(second);
+    state.set_snapshot(projected);
+    let surface = state.pane_surface.as_mut().expect("presented surface");
+    let mut right = surface.panes[0].clone();
+    right.pane_id = "pane_1b".into();
+    right.focused = false;
+    let half = surface.panes[0].rect.width / 2;
+    surface.panes[0].rect.width = half;
+    surface.panes[0].inner_rect.width = half;
+    right.rect.x = half;
+    right.rect.width = half;
+    right.inner_rect.x = half;
+    right.inner_rect.width = half;
+    surface.panes.push(right);
+}
+
+#[test]
+fn a_warm_switch_shows_the_target_exactly_when_the_shell_said_it_could() {
+    /// The setup, the target, and the screen and pane shown at once, if any.
+    type Case = (
+        &'static str,
+        fn() -> ClientShellState,
+        ClientEndpointFocusTarget,
+        Option<(&'static str, &'static str)>,
+    );
+    let cases: [Case; 11] = [
+        (
+            "remembered tab",
+            || visited(&["tab_3", "tab_1"]),
+            ClientEndpointFocusTarget::Tab("tab_3".into()),
+            Some(("SCREEN tab_3", "pane_3")),
+        ),
+        (
+            "workspace whose active tab is remembered",
+            || visited(&["tab_2", "tab_1"]),
+            ClientEndpointFocusTarget::Workspace("ws_2".into()),
+            Some(("SCREEN tab_2", "pane_2")),
+        ),
+        (
+            "pane of a remembered tab",
+            || visited(&["tab_3", "tab_1"]),
+            ClientEndpointFocusTarget::Pane("pane_3".into()),
+            Some(("SCREEN tab_3", "pane_3")),
+        ),
+        (
+            "unfocused pane of a remembered tab, restyled",
+            || {
+                let mut state = visited(&["tab_3", "tab_1"]);
+                with_second_pane_in_tab_3(&mut state);
+                cache_pane_focus_style(&mut state);
+                state
+            },
+            ClientEndpointFocusTarget::Pane("pane_3b".into()),
+            Some(("SCREEN tab_3", "pane_3b")),
+        ),
+        (
+            "pane on the kept surface, restyled",
+            || {
+                let mut state = visited(&["tab_1"]);
+                with_second_pane_in_tab_1(&mut state);
+                cache_pane_focus_style(&mut state);
+                state
+            },
+            ClientEndpointFocusTarget::Pane("pane_1b".into()),
+            Some(("SCREEN tab_1", "pane_1b")),
+        ),
+        (
+            "unfocused pane of a remembered tab, no focus style",
+            || {
+                let mut state = visited(&["tab_3", "tab_1"]);
+                with_second_pane_in_tab_3(&mut state);
+                state
+            },
+            ClientEndpointFocusTarget::Pane("pane_3b".into()),
+            None,
+        ),
+        (
+            "pane on the kept surface, no focus style",
+            || {
+                let mut state = visited(&["tab_1"]);
+                with_second_pane_in_tab_1(&mut state);
+                state
+            },
+            ClientEndpointFocusTarget::Pane("pane_1b".into()),
+            None,
+        ),
+        (
+            "tab with no remembered screen",
+            || visited(&["tab_1"]),
+            ClientEndpointFocusTarget::Tab("tab_3".into()),
+            None,
+        ),
+        (
+            "remembered screen of another size",
+            || {
+                let mut state = visited(&["tab_3", "tab_1"]);
+                state
+                    .remembered_tab_screens
+                    .get_mut(&(ClientEndpointId::Local, "tab_3".into()))
+                    .expect("remembered tab_3")
+                    .frame
+                    .width -= 1;
+                state
+            },
+            ClientEndpointFocusTarget::Tab("tab_3".into()),
+            None,
+        ),
+        (
+            "unknown pane",
+            || visited(&["tab_3", "tab_1"]),
+            ClientEndpointFocusTarget::Pane("gone".into()),
+            None,
+        ),
+        (
+            "endpoint without the focus method",
+            || {
+                let mut state = visited(&["tab_3", "tab_1"]);
+                state.set_endpoint_methods(Some(vec!["pane.focus".into()]));
+                state
+            },
+            ClientEndpointFocusTarget::Tab("tab_3".into()),
+            None,
+        ),
+    ];
+    for (case, setup, target, shown) in cases {
+        let mut state = setup();
+        let kept = leave_for_remote(&mut state);
+
+        let previews = return_warm(&mut state, kept, target);
+
+        // An unsupported request's notice covers the screen beneath it.
+        state.visible_endpoint_notice = None;
+        let (screen, pane) = shown.unwrap_or(("SCREEN tab_1", "pane_1"));
+        assert_eq!(previews, shown.is_some(), "{case}");
+        assert_eq!(shown_screen(&mut state).as_deref(), Some(screen), "{case}");
+        assert_eq!(typed_pane(&mut state), pane, "{case}");
+    }
+}
+
+#[test]
+fn a_popup_on_the_kept_surface_keeps_a_warm_switch_from_previewing_the_target() {
+    let with_popup = |state: &mut ClientShellState| {
+        state
+            .pane_surface
+            .as_mut()
+            .expect("presented surface")
+            .popup = surface_with_popup().popup;
+    };
+    let mut remembered_tab = visited(&["tab_3", "tab_1"]);
+    with_popup(&mut remembered_tab);
+    let mut pane_on_surface = visited(&["tab_1"]);
+    with_second_pane_in_tab_1(&mut pane_on_surface);
+    cache_pane_focus_style(&mut pane_on_surface);
+    with_popup(&mut pane_on_surface);
+    let cases = [
+        (
+            remembered_tab,
+            ClientEndpointFocusTarget::Tab("tab_3".into()),
+        ),
+        (
+            pane_on_surface,
+            ClientEndpointFocusTarget::Pane("pane_1b".into()),
+        ),
+    ];
+    for (mut state, target) in cases {
+        let kept = leave_for_remote(&mut state);
+
+        let previews = return_warm(&mut state, kept, target.clone());
+
+        assert!(!previews, "{target:?}");
+        assert!(state.popup_terminal_id.is_some(), "{target:?}");
+        assert!(state.previewed_tab.is_none(), "{target:?}");
+        assert_eq!(
+            shown_screen(&mut state).as_deref(),
+            Some("SCREEN tab_1"),
+            "{target:?}"
+        );
+    }
+}

@@ -1207,17 +1207,37 @@ impl ClientShellState {
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
+        self.layout_for(self.snapshot.as_deref(), cols, rows)
+    }
+
+    /// The layout once `snapshot` is the presented one.
+    fn layout_for(
+        &self,
+        snapshot: Option<&ClientShellSnapshot>,
+        cols: u16,
+        rows: u16,
+    ) -> ClientShellLayout {
         self.config.layout(
             cols,
             rows,
             self.sidebar_collapsed,
-            self.focused_tab_count(),
+            snapshot.map_or(0, Self::focused_tab_count),
             self.sidebar_width,
         )
     }
 
     pub(crate) fn surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
-        let surface = self.layout(cols, rows).pane_surface;
+        self.surface_size_for(self.snapshot.as_deref(), cols, rows)
+    }
+
+    /// The pane surface size once `snapshot` is the presented one.
+    pub(super) fn surface_size_for(
+        &self,
+        snapshot: Option<&ClientShellSnapshot>,
+        cols: u16,
+        rows: u16,
+    ) -> ClientSurfaceSize {
+        let surface = self.layout_for(snapshot, cols, rows).pane_surface;
         ClientSurfaceSize {
             cols: surface.width.max(1),
             rows: surface.height.max(1),

@@ -41,6 +41,15 @@ pub(super) struct PreviewedTab {
     pub(super) surface: PaneSurfaceFrame,
 }
 
+/// How a remembered tab screen stands in for its tab.
+struct TabPreviewPlan<'a> {
+    surface: &'a PaneSurfaceFrame,
+    /// The pane the screen shows focused.
+    shown_pane_id: String,
+    /// The pane to predict focus on instead, when the request names another one.
+    retarget: Option<String>,
+}
+
 impl ClientShellState {
     fn presentable_pane_surface(&self) -> Option<&PaneSurfaceFrame> {
         let snapshot = self.snapshot.as_deref()?;
@@ -68,6 +77,143 @@ impl ClientShellState {
             .insert((self.active_endpoint_id.clone(), tab_id), surface);
     }
 
+    /// The remembered screen of `tab_id` on `endpoint_id`, when it was rendered at `boot_id` and
+    /// `size`.
+    fn remembered_tab_screen(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        tab_id: &str,
+        boot_id: &str,
+        size: ClientSurfaceSize,
+    ) -> Option<&PaneSurfaceFrame> {
+        self.remembered_tab_screens
+            .get(&(endpoint_id.clone(), tab_id.to_owned()))
+            .filter(|surface| {
+                surface.boot_id == boot_id
+                    && (surface.frame.width, surface.frame.height) == (size.cols, size.rows)
+            })
+    }
+
+    /// How a remembered screen can show `endpoint_id`, presented with `snapshot` at `size`,
+    /// focused on `tab_id`: with focus on `pane_id` when given, otherwise on the pane that
+    /// screen shows focused.
+    fn tab_preview_plan(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        snapshot: &ClientShellSnapshot,
+        size: ClientSurfaceSize,
+        tab_id: &str,
+        pane_id: Option<&str>,
+    ) -> Option<TabPreviewPlan<'_>> {
+        if snapshot.focused_tab_id.as_deref() == Some(tab_id)
+            || !snapshot.tabs.iter().any(|tab| tab.tab_id == tab_id)
+        {
+            return None;
+        }
+        let surface = self.remembered_tab_screen(endpoint_id, tab_id, &snapshot.boot_id, size)?;
+        let shown_pane_id = surface
+            .panes
+            .iter()
+            .find(|pane| pane.focused)
+            .map(|pane| pane.pane_id.clone())
+            .filter(|pane_id| snapshot.panes.iter().any(|pane| &pane.pane_id == pane_id))?;
+        let retarget = match pane_id {
+            Some(pane_id) if pane_id != shown_pane_id => {
+                // A zoomed remembered screen may not show the pane at all.
+                let shown = surface.panes.iter().any(|pane| pane.pane_id == pane_id)
+                    && snapshot.panes.iter().any(|pane| pane.pane_id == pane_id);
+                // The remembered screen shows another pane focused; only the client can
+                // restyle it.
+                if !shown || snapshot.pane_focus_style.is_none() {
+                    return None;
+                }
+                Some(pane_id.to_owned())
+            }
+            _ => None,
+        };
+        Some(TabPreviewPlan {
+            surface,
+            shown_pane_id,
+            retarget,
+        })
+    }
+
+    /// Whether a request for `target`, made right after `endpoint_id` starts presenting
+    /// `surface` with its snapshot from `generation`, shows the target at once: as a preview of
+    /// a remembered tab screen, or as a pane focus prediction on `surface`. Answers before the
+    /// switch what [`Self::push_endpoint_method_with_kind`] does after
+    /// [`Self::activate_endpoint_projection_keeping_size`] and `surface` are applied.
+    pub(crate) fn can_preview_focus_target(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        surface: &PaneSurfaceFrame,
+        target: &ClientEndpointFocusTarget,
+    ) -> bool {
+        // Presenting `surface` restores its popup, which blocks a tab preview and keeps keys
+        // and the frame on the popup instead of a predicted pane.
+        if surface.popup.is_some() {
+            return false;
+        }
+        let Some(snapshot) = self.endpoint_snapshot(endpoint_id, generation) else {
+            return false;
+        };
+        if !self
+            .endpoint_supports_method(endpoint_id, &super::actions::focus_method(target.clone()))
+        {
+            return false;
+        }
+        let Some((cols, rows)) = self.last_composed_size else {
+            return false;
+        };
+        let size = self.surface_size_for(Some(snapshot), cols, rows);
+        let previews = |tab_id: &str, pane_id: Option<&str>| {
+            self.tab_preview_plan(endpoint_id, snapshot, size, tab_id, pane_id)
+                .is_some()
+        };
+        match target {
+            ClientEndpointFocusTarget::Workspace(workspace_id) => snapshot
+                .workspaces
+                .iter()
+                .find(|workspace| &workspace.workspace_id == workspace_id)
+                .is_some_and(|workspace| previews(&workspace.active_tab_id, None)),
+            ClientEndpointFocusTarget::Tab(tab_id) => previews(tab_id, None),
+            ClientEndpointFocusTarget::Pane(pane_id) => {
+                super::pane_focus::surface_can_show_pane_focus(snapshot, surface, pane_id)
+                    || snapshot
+                        .panes
+                        .iter()
+                        .find(|pane| &pane.pane_id == pane_id)
+                        .filter(|pane| snapshot.focused_tab_id.as_ref() != Some(&pane.tab_id))
+                        .is_some_and(|pane| previews(&pane.tab_id, Some(pane_id)))
+            }
+        }
+    }
+
+    /// The tab and pane the user is shown focused.
+    #[cfg(test)]
+    pub(crate) fn shown_focus_for_test(&self) -> (Option<String>, Option<String>) {
+        (
+            self.effective_focused_tab_id().map(str::to_owned),
+            self.focused_pane_id(),
+        )
+    }
+
+    /// [`Self::activate_endpoint_projection`] for a switch whose next frame is composed at the
+    /// size of the last one. Activating another endpoint forgets the composed size, which a tab
+    /// preview needs before that frame.
+    pub(crate) fn activate_endpoint_projection_keeping_size(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+    ) -> bool {
+        let size = self.last_composed_size;
+        let activated = self.activate_endpoint_projection(endpoint_id);
+        if activated {
+            self.last_composed_size = size;
+        }
+        activated
+    }
+
     /// Shows the remembered screen of `tab_id` as if `request_id` had already focused it, with
     /// focus on `pane_id` when given, otherwise on the pane that screen shows focused. Returns
     /// whether a preview started.
@@ -88,51 +234,27 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return false;
         };
-        if snapshot.focused_tab_id.as_deref() == Some(tab_id) {
-            return false;
-        }
-        let Some(surface) = self
-            .remembered_tab_screens
-            .get(&(self.active_endpoint_id.clone(), tab_id.to_owned()))
-            .filter(|surface| {
-                surface.boot_id == snapshot.boot_id
-                    && (surface.frame.width, surface.frame.height) == (size.cols, size.rows)
-            })
+        let Some(plan) =
+            self.tab_preview_plan(&self.active_endpoint_id, snapshot, size, tab_id, pane_id)
         else {
             return false;
         };
-        let Some(shown_pane_id) = surface
-            .panes
-            .iter()
-            .find(|pane| pane.focused)
-            .map(|pane| pane.pane_id.clone())
-            .filter(|pane_id| snapshot.panes.iter().any(|pane| &pane.pane_id == pane_id))
+        let Some(preview_snapshot) = previewed_snapshot(snapshot, tab_id, &plan.shown_pane_id)
         else {
             return false;
         };
-        let retarget = match pane_id {
-            Some(pane_id) if pane_id != shown_pane_id => {
-                // A zoomed remembered screen may not show the pane at all.
-                let shown = surface.panes.iter().any(|pane| pane.pane_id == pane_id)
-                    && snapshot.panes.iter().any(|pane| pane.pane_id == pane_id);
-                // The remembered screen shows another pane focused; only the client can
-                // restyle it.
-                if !shown || snapshot.pane_focus_style.is_none() {
-                    return false;
-                }
-                Some(pane_id.to_owned())
-            }
-            _ => None,
-        };
-        let Some(preview_snapshot) = previewed_snapshot(snapshot, tab_id, &shown_pane_id) else {
-            return false;
-        };
+        let TabPreviewPlan {
+            surface,
+            shown_pane_id,
+            retarget,
+        } = plan;
+        let surface = surface.clone();
         self.previewed_tab = Some(PreviewedTab {
             tab_id: tab_id.to_owned(),
             pane_id: shown_pane_id,
             request_id: request_id.clone(),
             snapshot: preview_snapshot,
-            surface: surface.clone(),
+            surface,
         });
         self.pending_workspace_highlight = None;
         if let Some(pane_id) = retarget {
@@ -318,12 +440,13 @@ impl ClientShellState {
             }
             requests.tab_ids.insert(tab.tab_id.clone());
             let remembered = self
-                .remembered_tab_screens
-                .get(&(self.active_endpoint_id.clone(), tab.tab_id.clone()))
-                .is_some_and(|surface| {
-                    surface.boot_id == snapshot.boot_id
-                        && (surface.frame.width, surface.frame.height) == (size.cols, size.rows)
-                });
+                .remembered_tab_screen(
+                    &self.active_endpoint_id,
+                    &tab.tab_id,
+                    &snapshot.boot_id,
+                    size,
+                )
+                .is_some();
             if !remembered {
                 requests.in_flight = Some(InFlightTabScreen {
                     tab_id: tab.tab_id.clone(),
@@ -407,18 +530,14 @@ impl ClientShellState {
         if !current {
             return;
         }
-        let key = (endpoint_id.clone(), tab_id);
         if self
-            .remembered_tab_screens
-            .get(&key)
-            .is_some_and(|remembered| {
-                remembered.boot_id == surface.boot_id
-                    && (remembered.frame.width, remembered.frame.height) == (size.cols, size.rows)
-            })
+            .remembered_tab_screen(endpoint_id, &tab_id, &surface.boot_id, size)
+            .is_some()
         {
             return;
         }
-        self.remembered_tab_screens.insert(key, surface);
+        self.remembered_tab_screens
+            .insert((endpoint_id.clone(), tab_id), surface);
     }
 
     /// Forgets remembered screens the active endpoint can no longer show.

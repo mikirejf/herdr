@@ -36,6 +36,25 @@ pub(super) fn pane_in_direction(
     )
 }
 
+/// Whether `surface`, presented with `snapshot`, can show focus on `pane_id` without the
+/// endpoint.
+pub(super) fn surface_can_show_pane_focus(
+    snapshot: &ClientShellSnapshot,
+    surface: &PaneSurfaceFrame,
+    pane_id: &str,
+) -> bool {
+    // A zoomed surface shows one pane, and focusing another pane changes the zoom.
+    let zoomed = snapshot
+        .tabs
+        .iter()
+        .any(|tab| Some(&tab.tab_id) == snapshot.focused_tab_id.as_ref() && tab.zoomed);
+    snapshot.pane_focus_style.is_some()
+        && !zoomed
+        && surface.boot_id == snapshot.boot_id
+        && surface.projection_revision == snapshot.revision
+        && surface.panes.iter().any(|pane| pane.pane_id == pane_id)
+}
+
 impl ClientShellState {
     /// The pane that receives keys and pane-targeted actions: the predicted pane while a focus
     /// change is in flight, then the previewed tab's pane, otherwise the endpoint's focused pane.
@@ -63,18 +82,9 @@ impl ClientShellState {
         let Some(surface) = self.pane_surface.as_ref() else {
             return false;
         };
-        // A zoomed surface shows one pane, and focusing another pane changes the zoom.
-        let zoomed = snapshot
-            .tabs
-            .iter()
-            .any(|tab| Some(&tab.tab_id) == snapshot.focused_tab_id.as_ref() && tab.zoomed);
-        snapshot.pane_focus_style.is_some()
-            && self.previewed_tab.is_none()
-            && !zoomed
+        self.previewed_tab.is_none()
             && self.pending_pane_surface.is_none()
-            && surface.boot_id == snapshot.boot_id
-            && surface.projection_revision == snapshot.revision
-            && surface.panes.iter().any(|pane| pane.pane_id == pane_id)
+            && surface_can_show_pane_focus(snapshot, surface, pane_id)
     }
 
     /// The pane the endpoint's directional focus picks from `source`, or `None` when the

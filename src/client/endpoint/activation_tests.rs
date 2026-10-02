@@ -1966,20 +1966,34 @@ fn local_with_background_remote() -> TestFixture {
 /// Like `local_with_background_remote`, with the modes the client held for the remote when it
 /// left it.
 fn local_with_background_remote_seeded(modes: [crate::protocol::ServerMessage; 2]) -> TestFixture {
+    local_with_background_remote_at(modes, resize())
+}
+
+/// Like `local_with_background_remote_seeded`, with the surfaces rendered for `resize`.
+fn local_with_background_remote_at(
+    modes: [crate::protocol::ServerMessage; 2],
+    resize: crate::protocol::ClientMessage,
+) -> TestFixture {
     let (mut shell, mut endpoints, local_sent, remote_sent) = shell_and_registry();
     let remote = endpoint();
+    let geometry = resize_geometry(&resize).expect("a resize message");
+    let sized = |mut frame: crate::protocol::PaneSurfaceFrame| {
+        frame.frame.width = geometry.cols;
+        frame.frame.height = geometry.rows;
+        frame
+    };
     endpoints.set_surface_active(&ClientEndpointId::Local, false);
     endpoints.set_surface_active(&remote, true);
     assert!(endpoints.set_active(&remote));
     assert!(shell.activate_endpoint_projection(&remote));
-    shell.set_pane_surface(surface("remote-boot", 1, "remote-pane"));
+    shell.set_pane_surface(sized(surface("remote-boot", 1, "remote-pane")));
 
     let mut activation = PendingEndpointActivation::begin_with_modes(
         &shell,
         &mut endpoints,
         ClientEndpointId::Local,
         None,
-        resize(),
+        resize,
         3,
         modes,
         Instant::now(),
@@ -2002,7 +2016,7 @@ fn local_with_background_remote_seeded(modes: [crate::protocol::ServerMessage; 2
         activation.receive_surface(
             &ClientEndpointId::Local,
             1,
-            surface("local-boot", 2, "local-pane")
+            sized(surface("local-boot", 2, "local-pane"))
         ),
         SurfaceActivationProgress::Ready
     );
@@ -2026,6 +2040,7 @@ fn present_remote_at_once(
         9,
         [mouse_capture(false), keyboard_report_all(false)],
     )
+    .map(|warm| warm.committed)
 }
 
 #[test]
@@ -2228,4 +2243,353 @@ fn a_stale_background_surface_falls_back_to_a_full_activation() {
             "{case}"
         );
     }
+}
+
+const SHELL_SIZE: (u16, u16) = (100, 30);
+
+fn shell_resize() -> crate::protocol::ClientMessage {
+    crate::client::shell_runtime::client_shell_resize_message(
+        &shell_and_registry().0,
+        SHELL_SIZE.0,
+        SHELL_SIZE.1,
+        0,
+        0,
+        false,
+    )
+}
+
+/// The remote's projection: `ws_a` holds `tab_a`, focused on `remote-pane`, and `tab_c`;
+/// `ws_b` holds `tab_b` with `pane_b` and `pane_b2`.
+fn remote_tabs_snapshot(revision: u64) -> crate::protocol::ClientShellSnapshot {
+    use crate::protocol::{ClientShellPane, ClientShellTab, ClientShellWorkspace};
+
+    let status = crate::api::schema::AgentStatus::Idle;
+    let workspace = |workspace_id: &str, active_tab_id: &str, number| ClientShellWorkspace {
+        workspace_id: workspace_id.into(),
+        active_tab_id: active_tab_id.into(),
+        new_workspace_cwd: "/repo".into(),
+        number,
+        label: workspace_id.into(),
+        custom_label: false,
+        branch: None,
+        git_ahead_behind: None,
+        tokens: Vec::new(),
+        worktree: None,
+        focused: workspace_id == "ws_a",
+        agent_status: status,
+    };
+    let tab = |tab_id: &str, workspace_id: &str, number| ClientShellTab {
+        tab_id: tab_id.into(),
+        workspace_id: workspace_id.into(),
+        number,
+        label: tab_id.into(),
+        custom_label: false,
+        zoomed: false,
+        focused: tab_id == "tab_a",
+        agent_status: status,
+    };
+    let pane = |pane_id: &str, tab_id: &str, workspace_id: &str| ClientShellPane {
+        pane_id: pane_id.into(),
+        workspace_id: workspace_id.into(),
+        tab_id: tab_id.into(),
+        label: None,
+        cwd: None,
+        foreground_cwd: None,
+        focused: pane_id == "remote-pane",
+        right_click_passthrough: false,
+    };
+    let color = ratatui::style::Color::Rgb(200, 120, 0);
+    crate::protocol::ClientShellSnapshot {
+        focused_workspace_id: Some("ws_a".into()),
+        focused_tab_id: Some("tab_a".into()),
+        focused_pane_id: Some("remote-pane".into()),
+        workspaces: vec![workspace("ws_a", "tab_a", 1), workspace("ws_b", "tab_b", 2)],
+        tabs: vec![
+            tab("tab_a", "ws_a", 1),
+            tab("tab_c", "ws_a", 2),
+            tab("tab_b", "ws_b", 1),
+        ],
+        panes: vec![
+            pane("remote-pane", "tab_a", "ws_a"),
+            pane("pane_c", "tab_c", "ws_a"),
+            pane("pane_b", "tab_b", "ws_b"),
+            pane("pane_b2", "tab_b", "ws_b"),
+        ],
+        pane_focus_style: Some(crate::protocol::ClientShellPaneFocusStyle::new(
+            crate::ui::PaneFocusColors {
+                accent: color,
+                overlay0: color,
+                overlay1: color,
+                surface_dim: color,
+            },
+            true,
+        )),
+        ..test_snapshot("remote-boot", revision)
+    }
+}
+
+/// The screen of `tab_b` the client remembers, with `pane_b` focused beside `pane_b2`.
+fn tab_b_screen(size: crate::protocol::ClientSurfaceSize) -> crate::protocol::PaneSurfaceFrame {
+    let mut screen = surface("remote-boot", 1, "pane_b");
+    screen.frame.width = size.cols;
+    screen.frame.height = size.rows;
+    let mut second = screen.panes[0].clone();
+    second.pane_id = "pane_b2".into();
+    second.focused = false;
+    screen.panes.push(second);
+    screen
+}
+
+/// Local presents at `SHELL_SIZE` with the remote, still on `tab_a`, in the background. The
+/// client remembers the remote's `tab_b` screen.
+fn local_remembering_remote_tab_b() -> TestFixture {
+    let (mut shell, endpoints, local_sent, remote_sent) = local_with_background_remote_at(
+        [mouse_capture(false), keyboard_report_all(false)],
+        shell_resize(),
+    );
+    shell.cache_endpoint_snapshot_inactive_for_generation(
+        &endpoint(),
+        7,
+        Box::new(remote_tabs_snapshot(1)),
+    );
+    shell.compose(SHELL_SIZE.0, SHELL_SIZE.1);
+    let size = shell.surface_size(SHELL_SIZE.0, SHELL_SIZE.1);
+    shell.receive_tab_screen(&endpoint(), "tab_b".into(), tab_b_screen(size));
+    remote_sent.lock().unwrap().clear();
+    local_sent.lock().unwrap().clear();
+    (shell, endpoints, local_sent, remote_sent)
+}
+
+fn focus_remote_at_once(
+    shell: &mut crate::client::ClientShellState,
+    endpoints: &mut EndpointRegistry,
+    target: &crate::client::shell::ClientEndpointFocusTarget,
+) -> Result<WarmCommit, WarmPathMiss> {
+    present_background_surface(
+        shell,
+        endpoints,
+        &endpoint(),
+        Some(target),
+        &shell_resize(),
+        9,
+        [mouse_capture(false), keyboard_report_all(false)],
+    )
+}
+
+#[test]
+fn a_target_the_kept_surface_does_not_show_presents_at_once_from_a_remembered_tab_screen() {
+    use crate::client::shell::ClientEndpointFocusTarget as Target;
+
+    let cases = [
+        (Target::Tab("tab_b".into()), "pane_b"),
+        (Target::Workspace("ws_b".into()), "pane_b"),
+        (Target::Pane("pane_b".into()), "pane_b"),
+        (Target::Pane("pane_b2".into()), "pane_b2"),
+    ];
+    for (target, pane) in cases {
+        let (mut shell, mut endpoints, _local_sent, remote_sent) = local_remembering_remote_tab_b();
+
+        let warm = focus_remote_at_once(&mut shell, &mut endpoints, &target)
+            .unwrap_or_else(|miss| panic!("{target:?}: {miss}"));
+
+        assert_eq!(warm.focus.as_ref(), Some(&target));
+        assert_eq!(endpoints.active_id(), &endpoint(), "{target:?}");
+        assert!(
+            !remote_sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| surface_set_active(message).is_some()),
+            "{target:?}: no full activation"
+        );
+        let actions = shell.focus_endpoint_target(target.clone());
+        assert_eq!(actions.len(), 1, "{target:?}: one focus request");
+        assert_eq!(
+            shell.shown_focus_for_test(),
+            (Some("tab_b".into()), Some(pane.into())),
+            "{target:?}: the target shows before the endpoint answers"
+        );
+    }
+}
+
+#[test]
+fn a_target_the_shell_cannot_show_at_once_keeps_the_full_activation() {
+    use crate::client::shell::ClientEndpointFocusTarget as Target;
+
+    type Stale = fn(&mut crate::client::ClientShellState);
+    let cases: [(&str, Stale, Target, &str); 4] = [
+        (
+            "tab with no remembered screen",
+            |_| {},
+            Target::Tab("tab_c".into()),
+            "stale:focus",
+        ),
+        (
+            "remembered screen of another size",
+            |shell| {
+                shell.compose(SHELL_SIZE.0 - 10, SHELL_SIZE.1);
+            },
+            Target::Tab("tab_b".into()),
+            "stale:focus",
+        ),
+        (
+            "unknown pane",
+            |_| {},
+            Target::Pane("gone".into()),
+            "stale:focus",
+        ),
+        (
+            "snapshot ahead of the kept surface",
+            |shell| {
+                shell.cache_endpoint_snapshot_inactive_for_generation(
+                    &endpoint(),
+                    7,
+                    Box::new(remote_tabs_snapshot(2)),
+                );
+            },
+            Target::Tab("tab_b".into()),
+            "stale:revision+focus",
+        ),
+    ];
+    for (case, make_stale, target, reported) in cases {
+        let (mut shell, mut endpoints, local_sent, remote_sent) = local_remembering_remote_tab_b();
+        make_stale(&mut shell);
+
+        let miss = focus_remote_at_once(&mut shell, &mut endpoints, &target).expect_err(case);
+
+        assert_eq!(miss.to_string(), reported, "{case}");
+        assert_eq!(endpoints.active_id(), &ClientEndpointId::Local, "{case}");
+        assert!(remote_sent.lock().unwrap().is_empty(), "{case}");
+        assert!(local_sent.lock().unwrap().is_empty(), "{case}");
+    }
+}
+
+#[test]
+fn a_warm_switch_requests_the_target_before_composing_its_first_frame() {
+    use crate::client::{
+        endpoint_commands::EndpointCommands, shell_runtime::begin_endpoint_activation, ClientState,
+    };
+
+    let (shell, mut endpoints, _local_sent, remote_sent) = local_remembering_remote_tab_b();
+    let mut state = ClientState::test_new();
+    assert_eq!(state.reported_size, SHELL_SIZE);
+    state.shell = Some(shell);
+    let mut pending = None;
+    begin_endpoint_activation(
+        &mut state,
+        &mut endpoints,
+        &mut EndpointCommands::default(),
+        &mut pending,
+        &mut 9,
+        endpoint(),
+        Some(crate::client::shell::ClientEndpointFocusTarget::Tab(
+            "tab_b".into(),
+        )),
+        false,
+        Instant::now(),
+        &mut None,
+    )
+    .unwrap();
+
+    assert!(pending.is_none(), "the warm path committed");
+    assert_eq!(endpoints.active_id(), &endpoint());
+    let sent = remote_sent.lock().unwrap().clone();
+    let focus_request = |message: &crate::protocol::ClientMessage| {
+        let crate::protocol::ClientMessage::ClientShellEndpointRequest { request, .. } = message
+        else {
+            return false;
+        };
+        serde_json::from_str::<crate::api::schema::Request>(request).is_ok_and(|request| {
+            matches!(
+                request.method,
+                crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_b"
+            )
+        })
+    };
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [
+                foreground,
+                crate::protocol::ClientMessage::ClientShellFocus { focused: true },
+                request,
+            ] if is_control(foreground, crate::protocol::endpoint::SURFACE_FOREGROUND_KIND)
+                && focus_request(request)
+        ),
+        "the focus request follows the foreground control on the same connection: {sent:?}"
+    );
+    let shell = state.shell.as_mut().unwrap();
+    assert_eq!(
+        shell.shown_focus_for_test(),
+        (Some("tab_b".into()), Some("pane_b".into()))
+    );
+    let preview = shell
+        .compose(SHELL_SIZE.0, SHELL_SIZE.1)
+        .expect("preview frame")
+        .frame;
+    assert!(
+        state.blit_encoder.is_current(&preview),
+        "the frame the commit presented is the preview"
+    );
+}
+
+#[test]
+fn a_popup_on_the_kept_surface_keeps_the_full_activation() {
+    use crate::client::{
+        endpoint_commands::EndpointCommands, shell_runtime::begin_endpoint_activation, ClientState,
+    };
+
+    let (shell, mut endpoints, _local_sent, remote_sent) = local_remembering_remote_tab_b();
+    let geometry = resize_geometry(&shell_resize()).expect("a resize message");
+    let mut with_popup = surface("remote-boot", 1, "remote-pane");
+    with_popup.surface_revision = 2;
+    with_popup.frame.width = geometry.cols;
+    with_popup.frame.height = geometry.rows;
+    with_popup.popup = Some(Box::new(crate::protocol::ClientShellPopupSurface {
+        terminal_id: "popup".into(),
+        title: "popup".into(),
+        width: None,
+        height: None,
+        frame: with_popup.frame.clone(),
+        mouse_reporting: false,
+        sgr_pixel_mouse: false,
+        pixel_width: 0,
+        pixel_height: 0,
+    }));
+    assert!(endpoints
+        .follow_background_surface(
+            &endpoint(),
+            7,
+            Box::new(crate::protocol::ServerMessage::PaneSurface(with_popup)),
+        )
+        .is_none());
+    let mut state = ClientState::test_new();
+    state.shell = Some(shell);
+    let target = crate::client::shell::ClientEndpointFocusTarget::Tab("tab_b".into());
+
+    let miss = focus_remote_at_once(state.shell.as_mut().unwrap(), &mut endpoints, &target)
+        .expect_err("a popup blocks the tab preview");
+    assert_eq!(miss.to_string(), "stale:focus");
+    assert!(remote_sent.lock().unwrap().is_empty());
+
+    let mut pending = None;
+    begin_endpoint_activation(
+        &mut state,
+        &mut endpoints,
+        &mut EndpointCommands::default(),
+        &mut pending,
+        &mut 9,
+        endpoint(),
+        Some(target),
+        false,
+        Instant::now(),
+        &mut None,
+    )
+    .unwrap();
+    assert!(pending.is_some(), "the full activation runs");
+    assert!(remote_sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|message| surface_set_active(message) == Some(true)));
 }

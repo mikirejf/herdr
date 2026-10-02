@@ -1,5 +1,22 @@
 use super::*;
 
+/// The endpoint request that moves focus to `target`.
+pub(super) fn focus_method(target: ClientEndpointFocusTarget) -> crate::api::schema::Method {
+    match target {
+        ClientEndpointFocusTarget::Workspace(workspace_id) => {
+            crate::api::schema::Method::WorkspaceFocus(crate::api::schema::WorkspaceTarget {
+                workspace_id,
+            })
+        }
+        ClientEndpointFocusTarget::Tab(tab_id) => {
+            crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget { tab_id })
+        }
+        ClientEndpointFocusTarget::Pane(pane_id) => {
+            crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id })
+        }
+    }
+}
+
 impl ClientShellState {
     pub(super) fn record_binding(
         &mut self,
@@ -510,21 +527,8 @@ impl ClientShellState {
         &mut self,
         target: ClientEndpointFocusTarget,
     ) -> Vec<ClientShellAction> {
-        let method = match target {
-            ClientEndpointFocusTarget::Workspace(workspace_id) => {
-                crate::api::schema::Method::WorkspaceFocus(crate::api::schema::WorkspaceTarget {
-                    workspace_id,
-                })
-            }
-            ClientEndpointFocusTarget::Tab(tab_id) => {
-                crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget { tab_id })
-            }
-            ClientEndpointFocusTarget::Pane(pane_id) => {
-                crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id })
-            }
-        };
         let mut outcome = ClientShellInput::default();
-        self.push_endpoint_method(method, &mut outcome);
+        self.push_endpoint_method(focus_method(target), &mut outcome);
         outcome.actions
     }
 

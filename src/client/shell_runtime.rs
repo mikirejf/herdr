@@ -343,7 +343,7 @@ pub(super) fn begin_endpoint_activation(
             source_modes.clone(),
         ) {
             Err(miss) => warm_path = miss,
-            Ok(committed) => {
+            Ok(endpoint::WarmCommit { committed, focus }) => {
                 *next_surface_serial = next_surface_serial.saturating_add(1);
                 // Like a full handoff, commands still queued for the source must not land after it
                 // stopped presenting.
@@ -356,6 +356,20 @@ pub(super) fn begin_endpoint_activation(
                     shell.cancel_endpoint_request(&request_id);
                 }
                 state.replay_host_theme(endpoints, &endpoint_id);
+                if let (Some(target), Some(shell)) = (focus, state.shell.as_mut()) {
+                    // The request opens the tab preview, so it must precede the first frame. The
+                    // command lane rejects requests while input is frozen; committing opens it.
+                    endpoints.unfreeze_input();
+                    let actions = shell.focus_endpoint_target(target);
+                    dispatch_client_shell_actions(
+                        actions,
+                        endpoint_commands,
+                        endpoints,
+                        Some(shell),
+                        &mut state.detached_process_children,
+                        scheduled_activation,
+                    )?;
+                }
                 if let Some(event) =
                     present_committed_activation(state, endpoints, endpoint_commands, committed)?
                 {
