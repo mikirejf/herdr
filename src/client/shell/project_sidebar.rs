@@ -11,7 +11,7 @@ const MACHINE_BAR: &str = "▌";
 pub(super) enum ProjectRow {
     /// A machine that is not connected. Its row keeps its status and actions reachable.
     Endpoint(usize),
-    /// A repository with two or more spaces across all machines.
+    /// A repository with at least one space across all machines.
     Header {
         key: String,
         label: String,
@@ -22,6 +22,29 @@ pub(super) enum ProjectRow {
         endpoint: usize,
         entry: WorkspaceEntry,
     },
+}
+
+fn is_linked(workspace: &ClientShellWorkspace) -> bool {
+    workspace
+        .worktree
+        .as_ref()
+        .is_some_and(|worktree| worktree.is_linked_worktree)
+}
+
+/// Indented rows show their branch, except a linked worktree the user renamed. The header
+/// carries the main checkout's label, so its row shows the branch even when renamed.
+fn rows_for(
+    workspace: &ClientShellWorkspace,
+    entry: &WorkspaceEntry,
+    config: &ClientShellConfig,
+) -> Vec<Vec<crate::ui::ResolvedToken>> {
+    super::sidebar::workspace_rows_labelled(
+        workspace,
+        workspace.agent_status,
+        entry.indented,
+        entry.indented && (!workspace.custom_label || !is_linked(workspace)),
+        &config.spaces,
+    )
 }
 
 /// Rows in visual order. Equal worktree keys on different machines are one project because
@@ -76,21 +99,19 @@ pub(super) fn project_rows(
         },
     };
     for (worktree, mut members) in projects {
-        if members.len() == 1 {
-            rows.push(single(members[0]));
-            continue;
-        }
         // Stable, so ties keep endpoint order and then each endpoint's list order.
-        members.sort_by_key(|member| {
-            workspace(*member)
-                .worktree
-                .as_ref()
-                .is_some_and(|worktree| worktree.is_linked_worktree)
-        });
+        members.sort_by_key(|member| is_linked(workspace(*member)));
         let collapsed = collapsed_projects.contains(&worktree.key);
+        // Main checkouts sort first, so a main member leads the list when the project has one.
+        let main = workspace(members[0]);
+        let label = if is_linked(main) {
+            worktree.label.clone()
+        } else {
+            main.label.clone()
+        };
         rows.push(ProjectRow::Header {
             key: worktree.key.clone(),
-            label: worktree.label.clone(),
+            label,
             collapsed,
             status: members
                 .iter()
@@ -188,14 +209,9 @@ pub(super) fn render_list(
         .map(|row| match row {
             ProjectRow::Workspace { endpoint, entry } => workspace_of(endpoints, *endpoint, entry)
                 .map_or(1, |workspace| {
-                    super::sidebar::workspace_rows(
-                        workspace,
-                        workspace.agent_status,
-                        entry.indented,
-                        &config.spaces,
-                    )
-                    .len()
-                    .clamp(1, u16::MAX as usize) as u16
+                    rows_for(workspace, entry, config)
+                        .len()
+                        .clamp(1, u16::MAX as usize) as u16
                 }),
             _ => 1,
         })
@@ -399,12 +415,7 @@ fn render_workspace(
         workspace.agent_status,
         config.status_indicators,
         entry,
-        super::sidebar::workspace_rows(
-            workspace,
-            workspace.agent_status,
-            entry.indented,
-            &config.spaces,
-        ),
+        rows_for(workspace, entry, config),
         &endpoint.endpoint_id == state.active_endpoint_id && workspace.focused,
         selected,
         state.selected_workspace_id.is_some(),
@@ -512,7 +523,8 @@ mod tests {
                 "  jan-box:devkit-jan",
                 "  Local:test-audit",
                 "  jan-box:mutants (last)",
-                "Local:dotfiles",
+                "project dotfiles",
+                "  Local:dotfiles (last)",
                 "Local:scratch",
             ]
         );
@@ -557,7 +569,8 @@ mod tests {
             [
                 "project devkit ▸",
                 "  Local:devkit (last)",
-                "Local:dotfiles",
+                "project dotfiles",
+                "  Local:dotfiles (last)",
                 "Local:scratch",
             ]
         );

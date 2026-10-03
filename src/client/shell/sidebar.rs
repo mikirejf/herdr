@@ -655,7 +655,24 @@ pub(in crate::client::shell) fn workspace_rows(
     indented: bool,
     config: &SpacesSidebarConfig,
 ) -> Vec<Vec<crate::ui::ResolvedToken>> {
-    let label = if indented && !workspace.custom_label {
+    workspace_rows_labelled(
+        workspace,
+        status,
+        indented,
+        indented && !workspace.custom_label,
+        config,
+    )
+}
+
+/// `branch_label` picks the branch name over the workspace label as the row's name.
+pub(in crate::client::shell) fn workspace_rows_labelled(
+    workspace: &ClientShellWorkspace,
+    status: crate::api::schema::AgentStatus,
+    indented: bool,
+    branch_label: bool,
+    config: &SpacesSidebarConfig,
+) -> Vec<Vec<crate::ui::ResolvedToken>> {
+    let label = if branch_label {
         workspace
             .branch
             .as_deref()

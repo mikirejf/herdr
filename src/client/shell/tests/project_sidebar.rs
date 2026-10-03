@@ -101,11 +101,13 @@ fn project_sidebar_groups_machines_and_marks_rows_with_machine_color() {
         visible_workspaces(&state),
         ["ws_1", "rws_1", "ws_2", "ws_3"]
     );
-    let [(header, key)] = &state.hits.projects[..] else {
-        panic!("only devkit has two spaces");
+    let [(header, key), (dotfiles_header, dotfiles_key)] = &state.hits.projects[..] else {
+        panic!("devkit and dotfiles are projects");
     };
     assert_eq!(key, DEVKIT);
-    assert!(rows[header.y as usize].contains("devkit"));
+    assert!(rows[header.y as usize].contains("ws_1"));
+    assert_eq!(dotfiles_key, DOTFILES);
+    assert!(rows[dotfiles_header.y as usize].contains("ws_2"));
 
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     for hit in &state.hits.workspaces {
@@ -263,6 +265,111 @@ fn project_grouping_applies_with_a_single_machine() {
                 crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_3"
             )
     ));
+}
+
+fn renamed(mut workspace: ClientShellWorkspace, label: &str, branch: &str) -> ClientShellWorkspace {
+    workspace.label = label.into();
+    workspace.custom_label = true;
+    workspace.branch = Some(branch.into());
+    workspace
+}
+
+/// Text of the sidebar row that holds the space, found through its hit rectangle.
+fn row_text(frame: &FrameData, state: &ClientShellState, id: &str) -> String {
+    let hit = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == id)
+        .expect("space is visible");
+    frame_rows(frame)[hit.rect.y as usize].clone()
+}
+
+#[test]
+fn project_header_takes_the_main_label_and_the_main_row_shows_its_branch() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    let mut local = snapshot();
+    local.workspaces = vec![renamed(
+        workspace("ws_1", Some((DEVKIT, "devkit", false)), true),
+        "DEVKIT-MAIN",
+        "trunk",
+    )];
+    state.set_snapshot(Box::new(local));
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.focused_workspace_id = Some("rws_1".into());
+    remote.workspaces = vec![renamed(
+        workspace("rws_1", Some((DEVKIT, "devkit", true)), true),
+        "MY-WORKTREE",
+        "worktree/feature",
+    )];
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let rows = frame_rows(&frame);
+
+    let [(header, _)] = &state.hits.projects[..] else {
+        panic!("devkit has two spaces");
+    };
+    assert!(rows[header.y as usize].contains("DEVKIT-MAIN"));
+    let main = row_text(&frame, &state, "ws_1");
+    assert!(main.contains("trunk") && !main.contains("DEVKIT-MAIN"));
+    let linked = row_text(&frame, &state, "rws_1");
+    assert!(linked.contains("MY-WORKTREE") && !linked.contains("feature"));
+}
+
+#[test]
+fn one_workspace_project_gets_a_header_and_an_indented_branch_row() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.sidebar_group_by = SidebarGroupBy::Project;
+    let mut state = ClientShellState::new(config);
+    let mut local = snapshot();
+    local.workspaces = vec![
+        renamed(
+            workspace("ws_1", Some((DOTFILES, "dotfiles", false)), true),
+            "HOME-DOTS",
+            "trunk",
+        ),
+        workspace("ws_2", None, false),
+    ];
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let [(header, key)] = &state.hits.projects[..] else {
+        panic!("dotfiles is a project with one space");
+    };
+    assert_eq!(key, DOTFILES);
+    let header = *header;
+    assert!(frame_rows(&frame)[header.y as usize].contains("HOME-DOTS"));
+    let [project_row, loose_row] = &state.hits.workspaces[..] else {
+        panic!("two spaces are visible");
+    };
+    assert!(project_row.indented && !loose_row.indented);
+    assert!(project_row.rect.y > header.y);
+    let text = row_text(&frame, &state, "ws_1");
+    assert!(text.contains("trunk") && !text.contains("HOME-DOTS"));
+
+    click(&mut state, header);
+    state.compose(100, 40).expect("collapsed project");
+    assert_eq!(visible_workspaces(&state), ["ws_1", "ws_2"]);
+}
+
+#[test]
+fn project_without_a_main_checkout_keeps_the_repository_name() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.sidebar_group_by = SidebarGroupBy::Project;
+    let mut state = ClientShellState::new(config);
+    let mut local = snapshot();
+    local.workspaces = vec![
+        workspace("ws_1", Some((DEVKIT, "devkit", true)), true),
+        workspace("ws_2", Some((DEVKIT, "devkit", true)), false),
+    ];
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let [(header, _)] = &state.hits.projects[..] else {
+        panic!("devkit has two spaces");
+    };
+    assert!(frame_rows(&frame)[header.y as usize].contains("devkit"));
 }
 
 #[test]
