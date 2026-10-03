@@ -218,10 +218,24 @@ impl ClientShellState {
             _ => (None, None),
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
+        // The sidebar draws each machine from its cached snapshot. While a focus request
+        // travels, the active machine's cache still holds the focus the user left, so the
+        // shown focus stands in for it until the chrome is drawn.
+        let active_index = self
+            .endpoints
+            .iter()
+            .position(|endpoint| endpoint.endpoint_id == self.active_endpoint_id);
+        let cached_snapshot = active_index
+            .zip(self.shown_focus_snapshot())
+            .map(|(index, shown)| (index, self.endpoints[index].snapshot.replace(shown)));
+        let chrome_snapshot = cached_snapshot
+            .as_ref()
+            .and_then(|(index, _)| self.endpoints[*index].snapshot.as_deref())
+            .unwrap_or(snapshot);
         self.hits = render::render_shell(
             &mut buffer,
             layout,
-            snapshot,
+            chrome_snapshot,
             &self.config,
             render::ShellRenderState {
                 machine_diagnostics: &self.machine_diagnostics,
@@ -250,6 +264,9 @@ impl ClientShellState {
                 workspace_drop_indicator_row,
             },
         );
+        if let Some((index, cached)) = cached_snapshot {
+            self.endpoints[index].snapshot = cached;
+        }
         self.hits.panes = surface
             .panes
             .iter()

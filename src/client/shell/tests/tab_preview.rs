@@ -1463,3 +1463,95 @@ fn a_popup_on_the_kept_surface_keeps_a_warm_switch_from_previewing_the_target() 
         );
     }
 }
+
+/// Gives every pane of the presented snapshot an agent, focused with its pane.
+fn with_agents(state: &mut ClientShellState) {
+    let mut projected = state.snapshot.clone().expect("presented snapshot");
+    projected.agents = projected
+        .panes
+        .iter()
+        .map(|pane| crate::protocol::ClientShellAgent {
+            pane_id: pane.pane_id.clone(),
+            workspace_id: pane.workspace_id.clone(),
+            tab_id: pane.tab_id.clone(),
+            name: Some(format!("agent {}", pane.pane_id)),
+            display_agent: None,
+            agent: Some("droid".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: crate::api::schema::AgentStatus::Idle,
+            state_change_seq: 0,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: pane.focused,
+        })
+        .collect();
+    state.set_snapshot(projected);
+}
+
+/// The panes whose agent rows the sidebar highlights as focused, by machine.
+fn highlighted_agents(state: &mut ClientShellState) -> Vec<(ClientEndpointId, String)> {
+    let buffer = state
+        .compose(COLS, ROWS)
+        .expect("composed frame")
+        .to_ratatui_buffer()
+        .expect("frame buffer");
+    state
+        .hits
+        .endpoint_agents
+        .iter()
+        .filter(|(rect, _, _)| {
+            (rect.x..rect.right())
+                .all(|x| buffer[(x, rect.y)].bg == state.config.palette.active_row_bg)
+        })
+        .map(|(_, endpoint_id, pane_id)| (endpoint_id.clone(), pane_id.clone()))
+        .collect()
+}
+
+#[test]
+fn a_warm_switch_to_another_machine_highlights_the_clicked_agent_at_once() {
+    type Case = (&'static str, fn() -> ClientShellState, &'static str);
+    let cases: [Case; 2] = [
+        (
+            "agent in a remembered tab",
+            || {
+                let mut state = visited(&["tab_3", "tab_1"]);
+                with_agents(&mut state);
+                state
+            },
+            "pane_3",
+        ),
+        (
+            "agent on the kept surface",
+            || {
+                let mut state = visited(&["tab_1"]);
+                with_second_pane_in_tab_1(&mut state);
+                cache_pane_focus_style(&mut state);
+                with_agents(&mut state);
+                state
+            },
+            "pane_1b",
+        ),
+    ];
+    for (case, setup, clicked) in cases {
+        let mut state = setup();
+        let kept = leave_for_remote(&mut state);
+
+        assert!(
+            return_warm(
+                &mut state,
+                kept,
+                ClientEndpointFocusTarget::Pane(clicked.into())
+            ),
+            "{case}"
+        );
+
+        assert_eq!(typed_pane(&mut state), clicked, "{case}");
+        assert_eq!(
+            highlighted_agents(&mut state),
+            [(ClientEndpointId::Local, clicked.to_owned())],
+            "{case}: the agent the machine focused before must not flash first"
+        );
+    }
+}

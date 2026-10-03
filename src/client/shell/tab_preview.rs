@@ -263,6 +263,33 @@ impl ClientShellState {
         true
     }
 
+    /// The active endpoint's snapshot as the frame shows it, when that differs from the
+    /// endpoint's own: the previewed tab's, with focus on the predicted pane of the shown tab.
+    pub(super) fn shown_focus_snapshot(&self) -> Option<Box<ClientShellSnapshot>> {
+        let base = match self.previewed_tab.as_ref() {
+            Some(preview) => &*preview.snapshot,
+            None => self.snapshot.as_deref()?,
+        };
+        let predicted = self
+            .predicted_pane_focus
+            .as_ref()
+            .filter(|predicted| base.focused_pane_id.as_deref() != Some(predicted.pane_id.as_str()))
+            .filter(|predicted| {
+                base.panes.iter().any(|pane| {
+                    pane.pane_id == predicted.pane_id
+                        && base.focused_tab_id.as_deref() == Some(pane.tab_id.as_str())
+                })
+            })
+            .and_then(|predicted| {
+                previewed_snapshot(base, base.focused_tab_id.as_deref()?, &predicted.pane_id)
+            });
+        predicted.or_else(|| {
+            self.previewed_tab
+                .as_ref()
+                .map(|preview| preview.snapshot.clone())
+        })
+    }
+
     /// The tab the user is looking at: the previewed tab while its focus request awaits the
     /// endpoint, otherwise the endpoint's focused tab. Requests the user means for the shown
     /// tab must name it, not the endpoint's still-unchanged focus.
