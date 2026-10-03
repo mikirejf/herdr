@@ -87,12 +87,23 @@ pub(super) fn snapshot_with_completions(
                 branch: state.branch(),
                 git_ahead_behind: state.git_ahead_behind(),
                 tokens,
+                // Spaces opened without `herdr worktree` have no membership but still check out a
+                // repository, so the client groups them by what git reports.
                 worktree: workspace
                     .worktree
                     .map(|worktree| protocol::ClientShellWorktree {
                         key: worktree.repo_key,
                         label: worktree.repo_name,
                         is_linked_worktree: worktree.is_linked_worktree,
+                    })
+                    .or_else(|| {
+                        state
+                            .git_space()
+                            .map(|space| protocol::ClientShellWorktree {
+                                key: space.key.clone(),
+                                label: space.repo_name.clone(),
+                                is_linked_worktree: space.is_linked_worktree,
+                            })
                     }),
                 agent_status: workspace.agent_status,
             }
@@ -701,6 +712,49 @@ mod tests {
                 notes.preview
             )),
             Some(("0.8.3", "### Changed\n- Client shell", true))
+        );
+    }
+
+    #[test]
+    fn snapshot_projects_the_git_repository_of_a_space_without_membership() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut plain = crate::workspace::Workspace::test_new("plain");
+        plain.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: "/repo/devkit/.git".into(),
+            checkout_key: "/repo/devkit-test".into(),
+            repo_name: "devkit".into(),
+            repo_root: "/repo/devkit-test".into(),
+            is_linked_worktree: true,
+        });
+        let outside = crate::workspace::Workspace::test_new("outside");
+        app.state.workspaces = vec![plain, outside];
+
+        let snapshot = snapshot(&app, "boot", 1, None, None);
+
+        let worktrees = snapshot
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .worktree
+                    .as_ref()
+                    .map(|worktree| (worktree.key.as_str(), worktree.label.as_str()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(worktrees, [Some(("/repo/devkit/.git", "devkit")), None]);
+        assert!(
+            snapshot.workspaces[0]
+                .worktree
+                .as_ref()
+                .unwrap()
+                .is_linked_worktree
         );
     }
 

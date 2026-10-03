@@ -1,11 +1,27 @@
 //! Project grouping for the expanded sidebar: spaces from every machine, grouped by the git
-//! repository they check out, each marked with its machine's color.
+//! repository they check out. A space on a remote machine ends with a dot in that machine's
+//! color.
 
 use super::render::{put_text, ShellRenderState};
 use super::*;
+use crate::config::{SpaceSidebarToken, SpacesSidebarConfig};
+use ratatui::{
+    text::Line,
+    widgets::{Paragraph, Widget},
+};
 
-/// Marks the machine a space runs on, in the color of that machine's focused pane border.
-const MACHINE_BAR: &str = "▌";
+/// Marks a space that runs on a remote machine, in the color of that machine's focused pane
+/// border.
+const MACHINE_DOT: &str = "●";
+
+/// Blank rows between one project and the next, and before the spaces outside a repository.
+const PROJECT_GAP: u16 = 1;
+
+/// Columns from the row start to the status icon of a space outside a repository, and of a
+/// project member. A space outside a repository lines up with the header text, and a member
+/// sits two columns past it.
+const LOOSE_INDENT: u16 = 2;
+const MEMBER_INDENT: u16 = 4;
 
 pub(super) enum ProjectRow {
     /// A machine that is not connected. Its row keeps its status and actions reachable.
@@ -30,20 +46,34 @@ fn is_linked(workspace: &ClientShellWorkspace) -> bool {
         .is_some_and(|worktree| worktree.is_linked_worktree)
 }
 
+/// Every space takes one line: its status icon and its name, whatever `spaces.rows` says.
+fn row_config() -> SpacesSidebarConfig {
+    SpacesSidebarConfig {
+        rows: vec![vec![
+            SpaceSidebarToken::StateIcon,
+            SpaceSidebarToken::Workspace,
+        ]],
+        row_gap: 0,
+    }
+}
+
 /// Indented rows show their branch, except a linked worktree the user renamed. The header
 /// carries the main checkout's label, so its row shows the branch even when renamed.
-fn rows_for(
+fn row_tokens(
     workspace: &ClientShellWorkspace,
     entry: &WorkspaceEntry,
-    config: &ClientShellConfig,
-) -> Vec<Vec<crate::ui::ResolvedToken>> {
+    row_config: &SpacesSidebarConfig,
+) -> Vec<crate::ui::ResolvedToken> {
     super::sidebar::workspace_rows_labelled(
         workspace,
         workspace.agent_status,
         entry.indented,
         entry.indented && (!workspace.custom_label || !is_linked(workspace)),
-        &config.spaces,
+        row_config,
     )
+    .into_iter()
+    .next()
+    .unwrap_or_default()
 }
 
 /// Rows in visual order. Equal worktree keys on different machines are one project because
@@ -235,25 +265,18 @@ pub(super) fn render_list(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
-    let row_heights = rows
-        .iter()
-        .map(|row| match row {
-            ProjectRow::Workspace { endpoint, entry } => workspace_of(endpoints, *endpoint, entry)
-                .map_or(1, |workspace| {
-                    rows_for(workspace, entry, config)
-                        .len()
-                        .clamp(1, u16::MAX as usize) as u16
-                }),
-            _ => 1,
-        })
-        .collect::<Vec<_>>();
+    let row_heights = vec![1; rows.len()];
     let gaps = rows
         .iter()
         .enumerate()
         .map(|(index, row)| match (row, rows.get(index + 1)) {
             (ProjectRow::Endpoint(_), _) | (_, None | Some(ProjectRow::Endpoint(_))) => 0,
-            (_, Some(ProjectRow::Workspace { entry, .. })) if entry.indented => 0,
-            _ => config.spaces.row_gap,
+            (_, Some(ProjectRow::Header { .. })) => PROJECT_GAP,
+            (
+                ProjectRow::Workspace { entry, .. },
+                Some(ProjectRow::Workspace { entry: next, .. }),
+            ) if entry.indented && !next.indented => PROJECT_GAP,
+            _ => 0,
         })
         .collect::<Vec<_>>();
 
@@ -343,14 +366,16 @@ pub(super) fn render_list(
                     collapsed.then_some(*status),
                     config,
                 );
-                put_text(
-                    buffer,
-                    rect.right().saturating_sub(1),
-                    rect.y,
-                    u16::from(rect.width > 0),
-                    if *collapsed { "▸" } else { "▾" },
-                    Style::default().fg(palette.accent),
-                );
+                if *collapsed {
+                    put_text(
+                        buffer,
+                        rect.right().saturating_sub(1),
+                        rect.y,
+                        u16::from(rect.width > 0),
+                        "▸",
+                        Style::default().fg(palette.accent),
+                    );
+                }
                 hits.projects.push((rect, key.clone()));
             }
             ProjectRow::Workspace {
@@ -425,9 +450,90 @@ fn render_workspace(
     state: &ShellRenderState<'_>,
 ) {
     let palette = &config.palette;
-    // The bar matches the focused pane border: the configured machine color, else the
-    // machine's own focus accent.
-    let color = config
+    let status = workspace.agent_status;
+    let focused = &endpoint.endpoint_id == state.active_endpoint_id && workspace.focused;
+    let selected = state
+        .selected_workspace_id
+        .is_some_and(|target| target.matches(&endpoint.endpoint_id, &workspace.workspace_id));
+
+    let x = rect.x.saturating_add(if entry.indented {
+        MEMBER_INDENT
+    } else {
+        LOOSE_INDENT
+    });
+    // Two columns stay free at the right: a space, then the machine dot.
+    let right = rect.right().saturating_sub(2);
+    let tokens = row_tokens(workspace, entry, &row_config());
+    let spans = crate::ui::resolved_token_spans(
+        &tokens,
+        (
+            status_icon(status, config.status_indicators),
+            Style::default().fg(status_color(status, palette)),
+        ),
+        Style::default().fg(status_color(status, palette)),
+        Style::default()
+            .fg(if focused {
+                palette.text
+            } else {
+                palette.subtext0
+            })
+            .add_modifier(if focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+        Style::default().fg(if focused {
+            palette.mauve
+        } else {
+            palette.overlay0
+        }),
+        Style::default().fg(palette.overlay1),
+        palette,
+        right.saturating_sub(x) as usize,
+    );
+    Paragraph::new(Line::from(spans))
+        .render(Rect::new(x, rect.y, right.saturating_sub(x), 1), buffer);
+
+    if endpoint.status != ClientEndpointStatus::Online {
+        buffer.set_style(
+            rect,
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        );
+    }
+    let background = if selected {
+        Some(super::sidebar::workspace_selection_background(palette))
+    } else if focused {
+        Some(super::sidebar::workspace_active_background(
+            palette,
+            state.selected_workspace_id.is_some(),
+        ))
+    } else {
+        None
+    };
+    if let Some(background) = background {
+        buffer.set_style(rect, Style::default().bg(background));
+    }
+    if endpoint.endpoint_id != ClientEndpointId::Local {
+        put_text(
+            buffer,
+            rect.right().saturating_sub(1),
+            rect.y,
+            u16::from(rect.width > 0),
+            MACHINE_DOT,
+            Style::default().fg(machine_color(endpoint, config)),
+        );
+    }
+}
+
+/// The color of the machine's focused pane border: its configured machine color, else the
+/// machine's own focus accent.
+fn machine_color(
+    endpoint: &ClientShellEndpoint,
+    config: &ClientShellConfig,
+) -> ratatui::style::Color {
+    config
         .machine_focus_colors
         .get(&endpoint.label)
         .copied()
@@ -437,49 +543,8 @@ fn render_workspace(
                 .as_deref()?
                 .pane_focus_style
                 .map(|style| style.colors().accent)
-        });
-    if let Some(color) = color {
-        for y in rect.y..rect.bottom() {
-            put_text(
-                buffer,
-                rect.x,
-                y,
-                u16::from(rect.width > 0),
-                MACHINE_BAR,
-                Style::default().fg(color),
-            );
-        }
-    }
-    let nested = Rect::new(
-        rect.x.saturating_add(1),
-        rect.y,
-        rect.width.saturating_sub(1),
-        rect.height,
-    );
-    let selected = state
-        .selected_workspace_id
-        .is_some_and(|target| target.matches(&endpoint.endpoint_id, &workspace.workspace_id));
-    super::sidebar::render_workspace_rows(
-        buffer,
-        nested,
-        workspace.agent_status,
-        config.status_indicators,
-        entry,
-        rows_for(workspace, entry, config),
-        &endpoint.endpoint_id == state.active_endpoint_id && workspace.focused,
-        selected,
-        state.selected_workspace_id.is_some(),
-        false,
-        palette,
-    );
-    if endpoint.status != ClientEndpointStatus::Online {
-        buffer.set_style(
-            nested,
-            Style::default()
-                .fg(palette.overlay0)
-                .add_modifier(Modifier::DIM),
-        );
-    }
+        })
+        .unwrap_or(config.palette.accent)
 }
 
 #[cfg(test)]

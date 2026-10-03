@@ -99,7 +99,7 @@ fn next_workspace(state: &mut ClientShellState) -> ClientShellInput {
 }
 
 #[test]
-fn project_sidebar_groups_machines_and_marks_rows_with_machine_color() {
+fn project_sidebar_groups_machines_and_ends_remote_rows_with_a_machine_dot() {
     let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
     let frame = state.compose(100, 40).expect("project sidebar");
     let rows = frame_rows(&frame);
@@ -120,16 +120,114 @@ fn project_sidebar_groups_machines_and_marks_rows_with_machine_color() {
 
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     for hit in &state.hits.workspaces {
-        let cell = &buffer[(hit.rect.x, hit.rect.y)];
-        assert_eq!(cell.symbol(), "▌");
-        // Build has no configured color, so its bar takes its own focus accent.
-        let expected = if hit.endpoint_id == remote_id {
-            ratatui::style::Color::Cyan
+        let cell = &buffer[(hit.rect.right() - 1, hit.rect.y)];
+        if hit.endpoint_id == remote_id {
+            // Build has no configured color, so its dot takes its own focus accent.
+            assert_eq!(cell.symbol(), "●");
+            assert_eq!(cell.fg, ratatui::style::Color::Cyan);
         } else {
-            ratatui::style::Color::Magenta
-        };
-        assert_eq!(cell.fg, expected);
+            assert_ne!(cell.symbol(), "●");
+        }
     }
+}
+
+/// The space list of each frame row, without the pane area beside it. Rows outside the list
+/// are empty.
+fn sidebar_rows(frame: &FrameData, state: &ClientShellState) -> Vec<String> {
+    let body = state.hits.workspace_body;
+    frame_rows(frame)
+        .iter()
+        .enumerate()
+        .map(|(y, row)| {
+            if (body.y..body.bottom()).contains(&(y as u16)) {
+                row.chars().take(body.right() as usize).collect()
+            } else {
+                String::new()
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn remote_dot_takes_the_configured_machine_color_and_keeps_clear_of_the_name() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    state
+        .config
+        .machine_focus_colors
+        .insert("Build".into(), ratatui::style::Color::Green);
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.workspaces = vec![workspace(
+        "a-remote-worktree-with-a-very-long-name",
+        Some((DEVKIT, "devkit", true)),
+        true,
+    )];
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let hit = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == remote_id)
+        .expect("remote space row");
+    let dot = &buffer[(hit.rect.right() - 1, hit.rect.y)];
+    assert_eq!((dot.symbol(), dot.fg), ("●", ratatui::style::Color::Green));
+    assert_eq!(buffer[(hit.rect.right() - 2, hit.rect.y)].symbol(), " ");
+}
+
+#[test]
+fn project_mode_draws_one_plain_line_per_space_with_blank_rows_between_projects() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let rows = sidebar_rows(&frame, &state);
+    for glyph in ["├", "└", "│", "▌", "▾"] {
+        assert!(
+            !rows.iter().any(|row| row.contains(glyph)),
+            "project mode draws no {glyph}"
+        );
+    }
+    assert!(!rows.iter().any(|row| row.contains("▸")));
+
+    let [(devkit, _), (dotfiles, _)] = &state.hits.projects[..] else {
+        panic!("devkit and dotfiles are projects");
+    };
+    let [ws_1, rws_1, ws_2, ws_3] = &state.hits.workspaces[..] else {
+        panic!("four spaces are visible");
+    };
+    // Members follow their header directly, one line each.
+    assert_eq!(ws_1.rect.y, devkit.y + 1);
+    assert_eq!(ws_1.rect.height, 1);
+    assert_eq!(rws_1.rect.y, ws_1.rect.y + 1);
+    assert_eq!(rws_1.rect.height, 1);
+    // One blank row separates projects, and the spaces outside a repository.
+    assert_eq!(dotfiles.y, rws_1.rect.y + 2);
+    assert!(rows[(dotfiles.y - 1) as usize].trim().is_empty());
+    assert_eq!(ws_2.rect.y, dotfiles.y + 1);
+    assert_eq!(ws_3.rect.y, ws_2.rect.y + 2);
+    assert!(rows[(ws_3.rect.y - 1) as usize].trim().is_empty());
+    // Members sit two columns past the header text; no line carries branch details.
+    let text_start = |y: u16| {
+        rows[y as usize]
+            .chars()
+            .position(|character| !character.is_whitespace())
+            .unwrap()
+    };
+    assert_eq!(text_start(ws_1.rect.y), text_start(devkit.y) + 2);
+}
+
+#[test]
+fn only_a_collapsed_header_shows_the_arrow() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    state.collapsed_projects.insert(DEVKIT.into());
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let rows = sidebar_rows(&frame, &state);
+    let [(devkit, _), (dotfiles, _)] = &state.hits.projects[..] else {
+        panic!("devkit and dotfiles are projects");
+    };
+    assert!(rows[devkit.y as usize].trim_end().ends_with('▸'));
+    assert!(!rows[dotfiles.y as usize].contains('▸'));
+    assert_eq!(rows.iter().filter(|row| row.contains('▸')).count(), 1);
 }
 
 #[test]

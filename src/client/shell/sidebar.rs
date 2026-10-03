@@ -4,7 +4,9 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-fn workspace_selection_background(palette: &Palette) -> ratatui::style::Color {
+pub(in crate::client::shell) fn workspace_selection_background(
+    palette: &Palette,
+) -> ratatui::style::Color {
     if palette.selection_bg == ratatui::style::Color::Reset {
         palette.active_row_bg
     } else {
