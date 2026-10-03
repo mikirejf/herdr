@@ -93,7 +93,7 @@ pub(super) fn render_agent_panel(
         |row| row.rows.len(),
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            render_agent_row(buffer, rect, row, config, false);
         },
     );
 }
@@ -340,6 +340,7 @@ pub(super) fn render_agent_row(
     rect: Rect,
     row: &AgentRow,
     config: &ClientShellConfig,
+    reserve_machine_dot: bool,
 ) {
     let palette = &config.palette;
     let row_style = if row.focused {
@@ -373,6 +374,12 @@ pub(super) fn render_agent_row(
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
+        // The first line keeps a space and a column free for the machine dot.
+        let dot_columns = if index == 0 && reserve_machine_dot {
+            2
+        } else {
+            0
+        };
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
             icon,
@@ -381,13 +388,27 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            rect.width
+                .saturating_sub(indent as u16)
+                .saturating_sub(dot_columns) as usize,
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
     }
+}
+
+/// Draws the machine dot in the last column of the row's first line.
+pub(super) fn render_machine_dot(buffer: &mut Buffer, rect: Rect, color: ratatui::style::Color) {
+    put_text(
+        buffer,
+        rect.right().saturating_sub(1),
+        rect.y,
+        u16::from(rect.width > 0),
+        super::project_sidebar::MACHINE_DOT,
+        Style::default().fg(color),
+    );
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

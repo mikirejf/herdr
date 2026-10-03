@@ -12,7 +12,7 @@ use ratatui::{
 
 /// Marks a space that runs on a remote machine, in the color of that machine's focused pane
 /// border.
-const MACHINE_DOT: &str = "●";
+pub(super) const MACHINE_DOT: &str = "●";
 
 /// Blank rows between one project and the next, and before the spaces outside a repository.
 const PROJECT_GAP: u16 = 1;
@@ -529,7 +529,7 @@ fn render_workspace(
 
 /// The color of the machine's focused pane border: its configured machine color, else the
 /// machine's own focus accent.
-fn machine_color(
+pub(super) fn machine_color(
     endpoint: &ClientShellEndpoint,
     config: &ClientShellConfig,
 ) -> ratatui::style::Color {

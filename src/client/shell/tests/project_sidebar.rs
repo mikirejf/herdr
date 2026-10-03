@@ -965,3 +965,107 @@ fn machine_grouping_keeps_its_footer_and_menus() {
         }))
     ));
 }
+
+/// One agent per machine: Local's runs in `ws_1`, Build's in `rws_1` under `remote_name`.
+fn add_agents(state: &mut ClientShellState, remote_name: &str) {
+    for endpoint in &mut state.endpoints {
+        let (workspace_id, name) = if endpoint.endpoint_id == ClientEndpointId::Local {
+            ("ws_1", "local-agent")
+        } else {
+            ("rws_1", remote_name)
+        };
+        let snapshot = endpoint.snapshot.as_deref_mut().expect("endpoint snapshot");
+        snapshot.agents = vec![ClientShellAgent {
+            pane_id: "pane_1".into(),
+            workspace_id: workspace_id.into(),
+            tab_id: "tab_1".into(),
+            name: Some(name.into()),
+            display_agent: None,
+            agent: Some("pi".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: crate::api::schema::AgentStatus::Idle,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: false,
+        }];
+    }
+}
+
+#[test]
+fn project_mode_marks_remote_agent_rows_with_the_machine_dot() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    add_agents(&mut state, "remote-agent");
+    state
+        .config
+        .machine_focus_colors
+        .insert("Build".into(), ratatui::style::Color::Green);
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    assert_eq!(state.hits.endpoint_agents.len(), 2);
+    for (rect, endpoint_id, _) in &state.hits.endpoint_agents {
+        let cell = &buffer[(rect.right() - 1, rect.y)];
+        if endpoint_id == &remote_id {
+            assert_eq!(
+                (cell.symbol(), cell.fg),
+                ("●", ratatui::style::Color::Green)
+            );
+            assert_eq!(buffer[(rect.right() - 2, rect.y)].symbol(), " ");
+        } else {
+            assert_ne!(cell.symbol(), "●");
+        }
+    }
+}
+
+#[test]
+fn remote_agent_dot_falls_back_to_the_machine_focus_accent() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    add_agents(&mut state, "remote-agent");
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let (rect, _, _) = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .find(|(_, endpoint_id, _)| endpoint_id == &remote_id)
+        .expect("remote agent row");
+    let dot = &buffer[(rect.right() - 1, rect.y)];
+    assert_eq!((dot.symbol(), dot.fg), ("●", ratatui::style::Color::Cyan));
+}
+
+#[test]
+fn machine_mode_agent_rows_have_no_machine_dot() {
+    let (mut state, _) = project_state(SidebarGroupBy::default());
+    add_agents(&mut state, "remote-agent");
+    let frame = state.compose(100, 40).expect("machine sidebar");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    assert_eq!(state.hits.endpoint_agents.len(), 2);
+    for (rect, _, _) in &state.hits.endpoint_agents {
+        assert_ne!(buffer[(rect.right() - 1, rect.y)].symbol(), "●");
+    }
+}
+
+#[test]
+fn long_first_lines_are_cut_before_the_machine_dot() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    add_agents(&mut state, "remote-agent");
+    for endpoint in &mut state.endpoints {
+        if endpoint.endpoint_id == remote_id {
+            let snapshot = endpoint.snapshot.as_deref_mut().expect("endpoint snapshot");
+            snapshot.workspaces[0].label = "a-very-long-workspace-name-".repeat(8);
+        }
+    }
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let (rect, _, _) = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .find(|(_, endpoint_id, _)| endpoint_id == &remote_id)
+        .expect("remote agent row");
+    assert_eq!(buffer[(rect.right() - 1, rect.y)].symbol(), "●");
+    assert_eq!(buffer[(rect.right() - 2, rect.y)].symbol(), " ");
+    assert_ne!(buffer[(rect.right() - 3, rect.y)].symbol(), " ");
+}
