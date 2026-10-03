@@ -335,7 +335,7 @@ pub(super) fn agent_row(
     })
 }
 
-/// Follows the first line of an agent on another machine, in the secondary text style.
+/// Follows the first line of an agent on another machine, in the agent name's style.
 const REMOTE_MARKER: &str = " [R]";
 
 pub(super) fn render_agent_row(
@@ -396,7 +396,7 @@ pub(super) fn render_agent_row(
                 .saturating_sub(marker_columns) as usize,
         ));
         if marker {
-            spans.push(ratatui::text::Span::styled(REMOTE_MARKER, secondary));
+            spans.push(ratatui::text::Span::styled(REMOTE_MARKER, name_style));
         }
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),

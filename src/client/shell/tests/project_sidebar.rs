@@ -1005,7 +1005,7 @@ fn first_line(buffer: &ratatui::buffer::Buffer, rect: ratatui::layout::Rect) -> 
 fn project_mode_marks_remote_agent_rows_with_the_remote_marker() {
     let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
     add_agents(&mut state, "remote-agent");
-    let gray = state.config.palette.overlay0;
+    let name_color = state.config.palette.subtext0;
     let frame = state.compose(100, 40).expect("project sidebar");
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     assert_eq!(state.hits.endpoint_agents.len(), 2);
@@ -1016,7 +1016,7 @@ fn project_mode_marks_remote_agent_rows_with_the_remote_marker() {
             let marker_x = rect.x + (line[..at].chars().count() + "rws_1 ".len()) as u16;
             for (offset, symbol) in ["[", "R", "]"].into_iter().enumerate() {
                 let cell = &buffer[(marker_x + offset as u16, rect.y)];
-                assert_eq!((cell.symbol(), cell.fg), (symbol, gray));
+                assert_eq!((cell.symbol(), cell.fg), (symbol, name_color));
             }
             assert_ne!(buffer[(rect.right() - 1, rect.y)].symbol(), "●");
         } else {
