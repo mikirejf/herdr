@@ -25,7 +25,11 @@ impl App {
                 true
             }
             crate::api::schema::Method::WorktreeCreate(params) => {
-                self.start_api_worktree_create(request.id, params, respond_to);
+                self.start_api_worktree_create(request.id, params, true, respond_to);
+                true
+            }
+            crate::api::schema::Method::WorktreeCreateCheckout(params) => {
+                self.start_api_worktree_create(request.id, params, false, respond_to);
                 true
             }
             crate::api::schema::Method::WorktreeRemove(params) => {
@@ -101,6 +105,7 @@ impl App {
         &mut self,
         id: String,
         params: WorktreeCreateParams,
+        open_parent_workspace: bool,
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
         let branch = params
@@ -188,6 +193,7 @@ impl App {
             repo_name: source.repo_name,
             label: params.label,
             focus: params.focus,
+            open_parent_workspace,
             respond_to,
         };
         let path = checkout_path;
@@ -410,9 +416,16 @@ impl App {
             repo_key: api.repo_key,
             repo_name: api.repo_name,
         };
-        if let Err(err) = self.ensure_source_parent_membership(&mut source, true) {
-            Self::send_api_response(api.respond_to, encode_error(api.id, err.code, err.message));
-            return;
+        // The worktree's membership comes from `source`, not from a parent workspace, so
+        // a missing parent can stay missing.
+        if api.open_parent_workspace || source.workspace_idx.is_some() {
+            if let Err(err) = self.ensure_source_parent_membership(&mut source, true) {
+                Self::send_api_response(
+                    api.respond_to,
+                    encode_error(api.id, err.code, err.message),
+                );
+                return;
+            }
         }
 
         let (ws_idx, created_workspace) =

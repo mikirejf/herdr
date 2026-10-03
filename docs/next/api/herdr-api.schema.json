@@ -5100,6 +5100,22 @@
         {
           "properties": {
             "method": {
+              "const": "worktree.create_checkout",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorktreeCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "worktree.open",
               "type": "string"
             },

@@ -1041,6 +1041,7 @@ mod tests {
                 repo_name: "herdr".into(),
                 label: None,
                 focus: false,
+                open_parent_workspace: true,
                 respond_to,
             }),
             result: Ok(()),
@@ -1126,6 +1127,158 @@ mod tests {
             false,
         );
         crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    fn remove_created_worktree(app: &mut App, repo: &Path, worktree_path: &str) {
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let remove = crate::worktree::build_worktree_remove_command(
+            repo,
+            Path::new(worktree_path),
+            false,
+            false,
+        );
+        crate::worktree::run_worktree_command(&remove).unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_worktree_create_checkout_without_parent_skips_parent_workspace() {
+        let repo = create_committed_repo("api-worktree-create-no-parent-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-no-parent-root");
+        let event_hub = crate::api::EventHub::default();
+        let mut app = test_app_with_event_hub(event_hub.clone());
+        app.state.worktree_directory = worktree_root.clone();
+        app.state.default_shell = test_shell().into();
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeCreateCheckout(WorktreeCreateParams {
+                    cwd: Some(repo.display().to_string()),
+                    branch: Some("worktree/api-create-no-parent".into()),
+                    ..WorktreeCreateParams::default()
+                }),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeCreated {
+            workspace,
+            worktree,
+            ..
+        } = success.result
+        else {
+            panic!("expected worktree_created response");
+        };
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        let membership = app.state.workspaces[0]
+            .worktree_space()
+            .expect("worktree workspace should carry membership");
+        assert!(membership.is_linked_worktree);
+        assert_eq!(
+            crate::worktree::canonical_or_original(&membership.repo_root),
+            crate::worktree::canonical_or_original(&repo)
+        );
+        assert_eq!(membership.checkout_path, Path::new(&worktree.path));
+        assert!(workspace.worktree.unwrap().is_linked_worktree);
+        let events = event_hub.events_after(0);
+        let created_workspaces = events
+            .iter()
+            .filter(|(_, event)| event.event == EventKind::WorkspaceCreated)
+            .count();
+        assert_eq!(created_workspaces, 1);
+        assert!(events
+            .iter()
+            .any(|(_, event)| event.event == EventKind::WorktreeCreated));
+
+        remove_created_worktree(&mut app, &repo, &worktree.path);
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn api_worktree_create_from_cwd_without_parent_still_creates_parent_workspace() {
+        let repo = create_committed_repo("api-worktree-create-parent-default-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-parent-default-root");
+        let mut app = test_app();
+        app.state.worktree_directory = worktree_root.clone();
+        app.state.default_shell = test_shell().into();
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                    cwd: Some(repo.display().to_string()),
+                    branch: Some("worktree/api-create-parent-default".into()),
+                    ..WorktreeCreateParams::default()
+                }),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeCreated { worktree, .. } = success.result else {
+            panic!("expected worktree_created response");
+        };
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert!(
+            !app.state.workspaces[0]
+                .worktree_space()
+                .unwrap()
+                .is_linked_worktree
+        );
+
+        remove_created_worktree(&mut app, &repo, &worktree.path);
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn api_worktree_create_checkout_marks_existing_parent() {
+        let repo = create_committed_repo("api-worktree-create-existing-parent-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-existing-parent-root");
+        let mut app = test_app();
+        let mut parent = Workspace::test_new("main");
+        parent.identity_cwd = repo.clone();
+        app.state.workspaces = vec![parent];
+        app.state.ensure_test_terminals();
+        app.state.worktree_directory = worktree_root.clone();
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeCreateCheckout(WorktreeCreateParams {
+                    cwd: Some(repo.display().to_string()),
+                    branch: Some("worktree/api-create-existing-parent".into()),
+                    ..WorktreeCreateParams::default()
+                }),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeCreated { worktree, .. } = success.result else {
+            panic!("expected worktree_created response");
+        };
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert!(
+            !app.state.workspaces[0]
+                .worktree_space()
+                .expect("existing parent should get membership")
+                .is_linked_worktree
+        );
+        assert!(
+            app.state.workspaces[1]
+                .worktree_space()
+                .unwrap()
+                .is_linked_worktree
+        );
+
+        remove_created_worktree(&mut app, &repo, &worktree.path);
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
     }

@@ -50,6 +50,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "workspace.move_block",
     "workspace.rename",
     "worktree.create",
+    "worktree.create_checkout",
     "worktree.list",
     "worktree.open",
     "worktree.remove",
@@ -297,6 +298,10 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        assert_eq!(
+            actual.remove("worktree.create_checkout").as_deref(),
+            Some("4189aa617e52b9a43c6b851528da23de1438a26c32fce287cd9b911c679b4029")
+        );
 
         assert_eq!(
             actual, expected,
@@ -373,6 +378,9 @@ mod tests {
                 offset_from_bottom: None,
             },
         )));
+        assert!(supports_client_shell_method(
+            &Method::WorktreeCreateCheckout(crate::api::schema::WorktreeCreateParams::default(),)
+        ));
         assert!(!supports_client_shell_method(&Method::Ping(
             crate::api::schema::PingParams::default(),
         )));

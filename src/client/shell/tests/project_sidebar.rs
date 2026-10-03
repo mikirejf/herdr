@@ -750,7 +750,7 @@ fn new_worktree_on_another_machine_switches_to_it_and_creates_there() {
     assert_eq!(endpoint_id, &remote_id);
     assert!(matches!(
         &request.method,
-        crate::api::schema::Method::WorktreeCreate(params)
+        crate::api::schema::Method::WorktreeCreateCheckout(params)
             if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
     ));
     let create_id = request.id.clone();
@@ -783,6 +783,53 @@ fn new_worktree_on_another_machine_switches_to_it_and_creates_there() {
         crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_2"
     ));
     assert!(state.overlay.is_none());
+}
+
+fn submitted_checkout_worktree_method(advertised: &[&str]) -> crate::api::schema::Method {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    open_project_menu(&mut state, DEVKIT);
+    pick(&mut state, "New worktree on Build");
+    assert!(state.activate_endpoint_projection(&remote_id));
+    let actions = state.start_pending_endpoint_intent();
+    let list_id = endpoint_request(&actions).1.id.clone();
+    state.handle_endpoint_result("remote-boot", &list_id, Ok(worktree_list_result(None)));
+    state.set_endpoint_methods_for(
+        &remote_id,
+        Some(
+            advertised
+                .iter()
+                .map(|method| (*method).to_owned())
+                .collect(),
+        ),
+    );
+    let submitted = press_enter(&mut state);
+    let (endpoint_id, request) = endpoint_request(&submitted.actions);
+    assert_eq!(endpoint_id, &remote_id);
+    request.method.clone()
+}
+
+#[test]
+fn new_worktree_on_a_machine_asks_not_to_open_the_main_checkout_when_supported() {
+    let method = submitted_checkout_worktree_method(&[
+        "worktree.create",
+        "worktree.create_checkout",
+        "worktree.list",
+    ]);
+    assert!(matches!(
+        method,
+        crate::api::schema::Method::WorktreeCreateCheckout(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
+    ));
+}
+
+#[test]
+fn new_worktree_on_an_older_machine_falls_back_to_plain_create() {
+    let method = submitted_checkout_worktree_method(&["worktree.create", "worktree.list"]);
+    assert!(matches!(
+        method,
+        crate::api::schema::Method::WorktreeCreate(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
+    ));
 }
 
 #[test]

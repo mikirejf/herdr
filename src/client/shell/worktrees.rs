@@ -262,17 +262,28 @@ impl ClientShellState {
         create.creating = true;
         create.error = None;
         let source = create.source.clone();
+        let params = crate::api::schema::WorktreeCreateParams {
+            workspace_id: source.workspace_id(),
+            cwd: source.cwd(),
+            branch: Some(branch),
+            base: Some("HEAD".to_owned()),
+            path: None,
+            label: None,
+            focus: false,
+            trust_repository: false,
+        };
+        // A checkout source only names the repository, so the machine should not gain a
+        // workspace for its main checkout. Servers without that method keep creating one.
+        let checkout_method = crate::api::schema::Method::WorktreeCreateCheckout(params.clone());
+        let method = if matches!(source, ClientWorktreeSource::Checkout(_))
+            && self.supports_endpoint_method(&checkout_method)
+        {
+            checkout_method
+        } else {
+            crate::api::schema::Method::WorktreeCreate(params)
+        };
         if !self.push_endpoint_method_with_kind(
-            crate::api::schema::Method::WorktreeCreate(crate::api::schema::WorktreeCreateParams {
-                workspace_id: source.workspace_id(),
-                cwd: source.cwd(),
-                branch: Some(branch),
-                base: Some("HEAD".to_owned()),
-                path: None,
-                label: None,
-                focus: false,
-                trust_repository: false,
-            }),
+            method,
             PendingEndpointKind::WorktreeCreate,
             outcome,
         ) {

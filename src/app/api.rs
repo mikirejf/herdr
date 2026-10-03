@@ -1055,12 +1055,12 @@ impl App {
                     "worktree discovery is handled asynchronously by the app runtime",
                 );
             }
-            Method::WorktreeCreate(params) => {
+            Method::WorktreeCreate(params) | Method::WorktreeCreateCheckout(params) => {
                 let _ = params;
                 return responses::encode_error(
                     request.id,
                     "invalid_request",
-                    "worktree.create is handled asynchronously by the app runtime",
+                    "worktree creation is handled asynchronously by the app runtime",
                 );
             }
             Method::WorktreeRemove(params) => {
