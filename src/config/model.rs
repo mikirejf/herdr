@@ -389,7 +389,7 @@ pub struct KeysConfig {
     /// Focus an agent by index 1-9. Unset by default.
     pub focus_agent: BindingConfig,
     /// Local-client shortcut that sends a clipboard image to a remote Herdr session. Default: "ctrl+v".
-    pub remote_image_paste: String,
+    pub remote_image_paste: BindingConfig,
     /// Create a new tab in the active workspace. Default: "prefix+c"
     pub new_tab: BindingConfig,
     /// Rename the active tab. Default: "prefix+shift+t".
@@ -526,7 +526,7 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_agent: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    remote_image_paste: Option<String>,
+    remote_image_paste: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1148,7 +1148,7 @@ impl Default for KeysConfig {
             previous_agent: BindingConfig::empty(),
             next_agent: BindingConfig::empty(),
             focus_agent: BindingConfig::empty(),
-            remote_image_paste: "ctrl+v".into(),
+            remote_image_paste: BindingConfig::one("ctrl+v"),
             new_tab: BindingConfig::one("prefix+c"),
             rename_tab: BindingConfig::one("prefix+shift+t"),
             previous_tab: BindingConfig::one("prefix+p"),

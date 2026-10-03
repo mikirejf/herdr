@@ -627,9 +627,9 @@
         },
         {
           "key": "keys.remote_image_paste",
-          "type": "string",
+          "type": "keybinding",
           "default": "\"ctrl+v\"",
-          "description": "Local-client shortcut that sends a clipboard image to a remote Herdr session."
+          "description": "Local-client shortcut(s) that send a clipboard image to a remote Herdr session. Accepts one key or an array of keys (e.g. [\"ctrl+v\", \"cmd+v\"]); an empty string disables it. On macOS Ghostty, Cmd+V reaches Herdr only with `keybind = performable:super+v=paste_from_clipboard`."
         },
         {
           "key": "keys.new_tab",

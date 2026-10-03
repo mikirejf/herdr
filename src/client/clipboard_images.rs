@@ -42,16 +42,14 @@ pub(super) fn write_remote_image_to_server(
     .map_err(ClientError::ConnectionLost)
 }
 
-pub(super) fn client_remote_image_paste_key(
+pub(super) fn client_remote_image_paste_keys(
     config: &crate::config::Config,
-) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
-    match config.remote_image_paste_key() {
-        Ok(key) => key,
-        Err(diagnostic) => {
-            warn!(diagnostic = %diagnostic, "local remote image paste key config diagnostic");
-            None
-        }
+) -> Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
+    let (keys, diagnostics) = config.remote_image_paste_keys();
+    for diagnostic in diagnostics {
+        warn!(diagnostic = %diagnostic, "local remote image paste key config diagnostic");
     }
+    keys
 }
 
 pub(super) fn endpoint_accepts_local_images(
@@ -66,7 +64,7 @@ pub(super) fn endpoint_accepts_local_images(
 pub(super) fn should_bridge_clipboard_image_paste(
     data: &[u8],
     is_remote_client: bool,
-    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    remote_image_paste_keys: &[(crossterm::event::KeyCode, crossterm::event::KeyModifiers)],
 ) -> bool {
     if !is_remote_client {
         return false;
@@ -75,16 +73,18 @@ pub(super) fn should_bridge_clipboard_image_paste(
         return true;
     }
 
-    let Some(remote_image_paste_key) = remote_image_paste_key else {
+    if remote_image_paste_keys.is_empty() {
         return false;
-    };
+    }
 
     let events = crate::raw_input::parse_raw_input_bytes_sync(data);
     matches!(
         events.as_slice(),
         [crate::raw_input::RawInputEvent::Key(key)]
             if key.kind == crossterm::event::KeyEventKind::Press
-                && crate::config::terminal_key_matches_combo(key, remote_image_paste_key)
+                && remote_image_paste_keys
+                    .iter()
+                    .any(|combo| crate::config::terminal_key_matches_combo(key, *combo))
     )
 }
 
@@ -92,7 +92,7 @@ pub(super) fn should_bridge_clipboard_image_paste(
 pub(super) fn should_bridge_clipboard_image_events(
     events: &[ClientInputEvent],
     is_remote_client: bool,
-    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    remote_image_paste_keys: &[(crossterm::event::KeyCode, crossterm::event::KeyModifiers)],
 ) -> bool {
     if !is_remote_client {
         return false;
@@ -101,9 +101,6 @@ pub(super) fn should_bridge_clipboard_image_events(
         return true;
     }
 
-    let Some(remote_image_paste_key) = remote_image_paste_key else {
-        return false;
-    };
     matches!(
         events,
         [event]
@@ -111,10 +108,9 @@ pub(super) fn should_bridge_clipboard_image_events(
                 event.to_raw_input_event(),
                 crate::raw_input::RawInputEvent::Key(key)
                     if key.kind == crossterm::event::KeyEventKind::Press
-                        && crate::config::terminal_key_matches_combo(
-                            &key,
-                            remote_image_paste_key,
-                        )
+                        && remote_image_paste_keys
+                            .iter()
+                            .any(|combo| crate::config::terminal_key_matches_combo(&key, *combo))
             )
     )
 }

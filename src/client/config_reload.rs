@@ -18,7 +18,7 @@ pub(super) fn apply_reload(
         &mut state.sound_config,
         &mut state.redraw_on_focus_gained,
         &mut state.draw_host_cursor,
-        &mut state.remote_image_paste_key,
+        &mut state.remote_image_paste_keys,
         &mut mouse_capture,
     );
     state.shell_mouse_capture_preference = mouse_capture;
@@ -93,10 +93,7 @@ pub(super) fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
     redraw_on_focus_gained: &mut bool,
     draw_host_cursor: &mut bool,
-    remote_image_paste_key: &mut Option<(
-        crossterm::event::KeyCode,
-        crossterm::event::KeyModifiers,
-    )>,
+    remote_image_paste_keys: &mut Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     mouse_capture: &mut bool,
 ) {
     match crate::config::load_live_config() {
@@ -118,7 +115,7 @@ pub(super) fn reload_local_client_config(
                 *mouse_capture = loaded.config.ui.mouse_capture;
             }
             if !invalid_section("keys") {
-                *remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
+                *remote_image_paste_keys = client_remote_image_paste_keys(&loaded.config);
             }
             debug!("reloaded local client config");
         }

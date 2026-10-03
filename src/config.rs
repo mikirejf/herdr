@@ -116,7 +116,7 @@ impl Config {
         prefix_diag
             .into_iter()
             .chain(keybind_diags)
-            .chain(self.remote_image_paste_key().err())
+            .chain(self.remote_image_paste_keys().1)
             .chain(self.theme.diagnostics())
             .chain(self.ui.sound.diagnostics())
             .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
@@ -154,14 +154,22 @@ impl Config {
             })
     }
 
-    pub(crate) fn remote_image_paste_key(&self) -> Result<Option<(KeyCode, KeyModifiers)>, String> {
-        let raw = self.keys.remote_image_paste.trim();
-        if raw.is_empty() {
-            return Ok(None);
+    pub(crate) fn remote_image_paste_keys(&self) -> (Vec<(KeyCode, KeyModifiers)>, Vec<String>) {
+        let mut keys = Vec::new();
+        let mut diagnostics = Vec::new();
+        for raw in self.keys.remote_image_paste.values() {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            match parse_key_combo(raw) {
+                Some(combo) => keys.push(combo),
+                None => diagnostics.push(format!(
+                    "invalid keybinding: keys.remote_image_paste = {raw:?}; disabling binding"
+                )),
+            }
         }
-        parse_key_combo(raw).map(Some).ok_or_else(|| {
-            format!("invalid keybinding: keys.remote_image_paste = {raw:?}; disabling binding")
-        })
+        (keys, diagnostics)
     }
 
     pub(crate) fn live_keybinds_with_diagnostics(
@@ -427,15 +435,52 @@ command = "echo one"
     fn remote_image_paste_key_defaults_to_ctrl_v() {
         let config = Config::default();
         assert_eq!(
-            config.remote_image_paste_key().unwrap(),
-            Some((KeyCode::Char('v'), KeyModifiers::CONTROL))
+            config.remote_image_paste_keys(),
+            (vec![(KeyCode::Char('v'), KeyModifiers::CONTROL)], vec![])
         );
     }
 
     #[test]
     fn remote_image_paste_key_can_be_disabled() {
         let config: Config = toml::from_str("[keys]\nremote_image_paste = ''\n").unwrap();
-        assert_eq!(config.remote_image_paste_key().unwrap(), None);
+        assert_eq!(config.remote_image_paste_keys(), (vec![], vec![]));
+        let config: Config = toml::from_str("[keys]\nremote_image_paste = ['', ' ']\n").unwrap();
+        assert_eq!(config.remote_image_paste_keys(), (vec![], vec![]));
+    }
+
+    #[test]
+    fn remote_image_paste_key_accepts_an_array() {
+        let config: Config =
+            toml::from_str("[keys]\nremote_image_paste = ['ctrl+v', 'cmd+v']\n").unwrap();
+        assert_eq!(
+            config.remote_image_paste_keys(),
+            (
+                vec![
+                    (KeyCode::Char('v'), KeyModifiers::CONTROL),
+                    (KeyCode::Char('v'), KeyModifiers::SUPER),
+                ],
+                vec![]
+            )
+        );
+    }
+
+    #[test]
+    fn remote_image_paste_key_invalid_entry_keeps_valid_keys() {
+        let config: Config =
+            toml::from_str("[keys]\nremote_image_paste = ['ctrl+v', 'bogus+v']\n").unwrap();
+        let (keys, diagnostics) = config.remote_image_paste_keys();
+        assert_eq!(keys, vec![(KeyCode::Char('v'), KeyModifiers::CONTROL)]);
+        assert_eq!(
+            diagnostics,
+            vec![
+                "invalid keybinding: keys.remote_image_paste = \"bogus+v\"; disabling binding"
+                    .to_string()
+            ]
+        );
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("keys.remote_image_paste")));
     }
 
     #[test]

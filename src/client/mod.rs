@@ -100,7 +100,7 @@ use attach::AttachEscapeState;
 #[cfg(unix)]
 use attach::{write_attach_semantic_action, AttachInputAction};
 use clipboard_images::{
-    client_remote_image_paste_key, endpoint_accepts_local_images, write_remote_image_to_server,
+    client_remote_image_paste_keys, endpoint_accepts_local_images, write_remote_image_to_server,
 };
 #[cfg(windows)]
 use clipboard_images::{read_image_file_from_client_events, should_bridge_clipboard_image_events};
@@ -191,7 +191,7 @@ fn run_client_with_mode(
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let host_cursor = loaded_config.config.ui.host_cursor;
-    let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
+    let remote_image_paste_keys = client_remote_image_paste_keys(&loaded_config.config);
     let kitty_graphics_enabled =
         loaded_config.config.kitty_graphics_enabled() && client_rendered_shell;
     let pixel_geometry_enabled = kitty_graphics_enabled || attach_escape.is_some();
@@ -210,7 +210,7 @@ fn run_client_with_mode(
         host_escape_disambiguation_active: false,
         initial_host_input: Vec::new(),
         endpoint_keybindings,
-        remote_image_paste_key,
+        remote_image_paste_keys,
         shell_config,
     };
 
@@ -480,7 +480,7 @@ async fn run_client_loop(
         attach_escape,
         #[cfg(unix)]
         mouse_scroll_lines: config.mouse_scroll_lines,
-        remote_image_paste_key: config.remote_image_paste_key,
+        remote_image_paste_keys: config.remote_image_paste_keys,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         repaint_pending: false,
         presentation_frozen: false,
@@ -878,7 +878,7 @@ async fn run_client_loop(
                         if should_bridge_clipboard_image_paste(
                             &data,
                             image_bridge_active,
-                            state.remote_image_paste_key,
+                            &state.remote_image_paste_keys,
                         ) {
                             if let Some(image) = crate::platform::read_clipboard_image() {
                                 write_remote_image_to_server(
@@ -1007,7 +1007,7 @@ async fn run_client_loop(
                 if should_bridge_clipboard_image_paste(
                     &data,
                     image_bridge_active,
-                    state.remote_image_paste_key,
+                    &state.remote_image_paste_keys,
                 ) {
                     if let Some(image) = crate::platform::read_clipboard_image() {
                         write_remote_image_to_server(
@@ -1187,7 +1187,7 @@ async fn run_client_loop(
                         if should_bridge_clipboard_image_events(
                             &events,
                             image_bridge_active,
-                            state.remote_image_paste_key,
+                            &state.remote_image_paste_keys,
                         ) {
                             if let Some(image) = crate::platform::read_clipboard_image() {
                                 write_remote_image_to_server(

@@ -1998,10 +1998,10 @@ mod tests {
                 crate::client::clipboard_images::should_bridge_clipboard_image_events(
                     &events,
                     true,
-                    Some((
+                    &[(
                         crossterm::event::KeyCode::Char('v'),
                         crossterm::event::KeyModifiers::CONTROL,
-                    )),
+                    )],
                 );
             delivered.extend(events);
         }

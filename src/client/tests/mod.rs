@@ -217,42 +217,59 @@ fn image_bridge_follows_the_selected_remote_endpoint() {
 #[cfg(unix)]
 #[test]
 fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
-    let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
-    assert!(should_bridge_clipboard_image_paste(
-        &[0x16],
-        true,
-        Some(ctrl_v)
-    ));
+    let ctrl_v = [crate::config::parse_key_combo("ctrl+v").unwrap()];
+    assert!(should_bridge_clipboard_image_paste(&[0x16], true, &ctrl_v));
     assert!(should_bridge_clipboard_image_paste(
         b"\x1b[118;5u",
         true,
-        Some(ctrl_v)
+        &ctrl_v
     ));
     assert!(should_bridge_clipboard_image_paste(
         b"\x1b[200~\x1b[201~",
         true,
-        None
+        &[]
     ));
     assert!(!should_bridge_clipboard_image_paste(
         b"\x1b[200~\x1b[201~",
         false,
-        Some(ctrl_v)
+        &ctrl_v
     ));
     assert!(!should_bridge_clipboard_image_paste(
         &[0x16],
         false,
-        Some(ctrl_v)
+        &ctrl_v
     ));
     assert!(!should_bridge_clipboard_image_paste(
         b"\x1b[200~text\x1b[201~",
         true,
-        Some(ctrl_v)
+        &ctrl_v
     ));
-    assert!(!should_bridge_clipboard_image_paste(&[0x16], true, None));
-    assert!(!should_bridge_clipboard_image_paste(
-        b"v",
+    assert!(!should_bridge_clipboard_image_paste(&[0x16], true, &[]));
+    assert!(!should_bridge_clipboard_image_paste(b"v", true, &ctrl_v));
+}
+
+#[cfg(unix)]
+#[test]
+fn clipboard_image_paste_bridge_triggers_on_any_listed_key() {
+    let keys = [
+        crate::config::parse_key_combo("ctrl+v").unwrap(),
+        crate::config::parse_key_combo("cmd+v").unwrap(),
+    ];
+    assert!(should_bridge_clipboard_image_paste(&[0x16], true, &keys));
+    assert!(should_bridge_clipboard_image_paste(
+        b"\x1b[118;9u",
         true,
-        Some(ctrl_v)
+        &keys
+    ));
+    assert!(!should_bridge_clipboard_image_paste(
+        b"\x1b[118;3u",
+        true,
+        &keys
+    ));
+    assert!(!should_bridge_clipboard_image_paste(
+        b"\x1b[118;9u",
+        true,
+        &keys[..1]
     ));
 }
 
@@ -697,14 +714,14 @@ fn reload_local_client_config_refreshes_local_client_presentation_state() {
     let mut sound_config = crate::config::SoundConfig::default();
     let mut redraw_on_focus_gained = true;
     let mut draw_host_cursor = false;
-    let mut remote_image_paste_key = None;
+    let mut remote_image_paste_keys = Vec::new();
     let mut mouse_capture = true;
 
     reload_local_client_config(
         &mut sound_config,
         &mut redraw_on_focus_gained,
         &mut draw_host_cursor,
-        &mut remote_image_paste_key,
+        &mut remote_image_paste_keys,
         &mut mouse_capture,
     );
 
@@ -731,14 +748,14 @@ fn reload_local_client_config_keeps_ui_preferences_when_ui_is_invalid() {
     let mut sound_config = crate::config::SoundConfig::default();
     let mut redraw_on_focus_gained = false;
     let mut draw_host_cursor = true;
-    let mut remote_image_paste_key = None;
+    let mut remote_image_paste_keys = Vec::new();
     let mut mouse_capture = false;
 
     reload_local_client_config(
         &mut sound_config,
         &mut redraw_on_focus_gained,
         &mut draw_host_cursor,
-        &mut remote_image_paste_key,
+        &mut remote_image_paste_keys,
         &mut mouse_capture,
     );
 
