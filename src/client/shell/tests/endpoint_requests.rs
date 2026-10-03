@@ -8,6 +8,7 @@ fn pending_popup() -> (ClientShellState, Vec<ClientShellAction>) {
         label: "prefix+t".into(),
         command: "popup-command".into(),
         action: crate::config::CustomCommandAction::Popup,
+        run_on: crate::config::CommandRunOn::Server,
         description: None,
         width: None,
         height: None,

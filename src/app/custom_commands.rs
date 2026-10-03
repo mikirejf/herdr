@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{self, Write};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -289,17 +288,9 @@ impl App {
         &mut self,
         binding: &crate::config::CustomCommandKeybind,
     ) -> std::io::Result<()> {
-        let mut command = crate::platform::detached_custom_command_process(&binding.command);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
         let (env, cwd) = self.custom_command_env();
-        command.envs(env);
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
-        }
-        let child = command.spawn()?;
+        let child =
+            crate::platform::spawn_detached_custom_command(&binding.command, env, cwd.as_deref())?;
         self.detached_process_children.push(child);
         Ok(())
     }
@@ -571,9 +562,13 @@ fn unique_scrollback_path(attempt: u32) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     fn test_app() -> crate::app::App {
+        test_app_with(&crate::config::Config::default())
+    }
+
+    fn test_app_with(config: &crate::config::Config) -> crate::app::App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         crate::app::App::new(
-            &crate::config::Config::default(),
+            config,
             crate::app::AppPolicy::TEST,
             None,
             api_rx,
@@ -587,6 +582,7 @@ mod tests {
             label: "prefix+z".into(),
             command: "secret-command --token hidden".into(),
             action,
+            run_on: crate::config::CommandRunOn::Server,
             description: Some("safe description".into()),
             width: None,
             height: None,
@@ -778,5 +774,33 @@ mod tests {
             crate::protocol::ClientShellCommandAction::Popup
         );
         assert!(!format!("{manifest:?}").contains("secret-command"));
+    }
+
+    #[test]
+    fn commands_that_run_on_the_client_stay_out_of_the_server_manifest() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = "prefix+u"
+command = "client-secret"
+run_on = "client"
+
+[[keys.command]]
+key = "prefix+z"
+command = "server-secret"
+"#,
+        )
+        .unwrap();
+        let app = test_app_with(&config);
+
+        let manifest = app.client_shell_command_manifest();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].binding_label, "prefix+z");
+        assert!(app
+            .state
+            .keybinds
+            .custom_commands
+            .iter()
+            .all(|binding| binding.run_on == crate::config::CommandRunOn::Server));
     }
 }

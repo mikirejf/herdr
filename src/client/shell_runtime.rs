@@ -55,6 +55,16 @@ pub(super) fn dispatch_client_shell_actions(
                     }
                 }
             }
+            shell::ClientShellAction::RunClientCommand(run) => {
+                match crate::platform::spawn_detached_custom_command(
+                    &run.command,
+                    run.env,
+                    run.cwd.as_deref(),
+                ) {
+                    Ok(child) => detached_process_children.push(child),
+                    Err(err) => warn!(err = %err, "failed to run client command"),
+                }
+            }
             shell::ClientShellAction::ReplayMouse(events) => replay_mouse.extend(events),
             shell::ClientShellAction::Keybind(action) => {
                 debug!(

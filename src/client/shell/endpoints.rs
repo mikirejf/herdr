@@ -12,6 +12,8 @@ pub(crate) struct ClientEndpointAgentViewProjection {
 pub(crate) struct ClientShellEndpoint {
     pub(crate) endpoint_id: ClientEndpointId,
     pub(crate) label: String,
+    /// The saved SSH target of a remote machine; `None` for the local machine.
+    pub(crate) ssh_target: Option<String>,
     pub(crate) status: ClientEndpointStatus,
     pub(crate) snapshot: Option<Box<ClientShellSnapshot>>,
     /// Connection generation that produced `snapshot`. `None` is reserved for local tests.
@@ -60,6 +62,7 @@ impl ClientShellState {
             next.push(ClientShellEndpoint {
                 endpoint_id,
                 label: profile.label.clone(),
+                ssh_target: Some(profile.target.clone()),
                 status: previous.map_or(
                     if profile.enabled {
                         ClientEndpointStatus::Connecting
@@ -764,6 +767,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
     ClientShellEndpoint {
         endpoint_id: ClientEndpointId::Local,
         label: "Local".into(),
+        ssh_target: None,
         status: ClientEndpointStatus::Online,
         snapshot: None,
         snapshot_generation: None,

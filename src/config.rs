@@ -18,8 +18,8 @@ pub use self::{
     },
     keybinds::{
         format_prefix_combos, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
-        BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
-        IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig,
+        BindingConfig, CommandKeybindConfig, CommandRunOn, CustomCommandAction,
+        CustomCommandKeybind, IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig,
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
@@ -187,11 +187,17 @@ impl Config {
     }
 }
 
-pub(crate) fn keybindings_from_profile_toml(profile: &str) -> Result<LiveKeybindConfig, String> {
-    let config = toml::from_str::<Config>(profile)
+/// Keybinds of a server profile, plus `client_commands` registered as the client resolves them.
+/// Profiles carry no commands of their own.
+pub(crate) fn keybindings_from_profile_toml(
+    profile: &str,
+    client_commands: Vec<CommandKeybindConfig>,
+) -> Result<LiveKeybindConfig, String> {
+    let mut config = toml::from_str::<Config>(profile)
         .map_err(|err| format!("invalid keybinding profile: {err}"))?;
+    config.keys.command = client_commands;
     config
-        .live_keybinds_with_diagnostics()
+        .live_client_keybinds_with_diagnostics()
         .map(|(keybinds, _diagnostics)| keybinds)
         .map_err(|diagnostics| diagnostics.join("; "))
 }
@@ -236,7 +242,7 @@ prefix = "ctrl+"
         .unwrap();
 
         let profile = config.local_keybindings_profile_toml().unwrap();
-        let keybinds = keybindings_from_profile_toml(&profile).unwrap();
+        let keybinds = keybindings_from_profile_toml(&profile, Vec::new()).unwrap();
 
         assert!(profile.contains("prefix = \"ctrl+b\""));
         assert_eq!(keybinds.prefix, config.prefix_keys());
@@ -260,7 +266,7 @@ prefix = ["ctrl+space", "ctrl+s"]
         assert!(!profile.contains("prefix = ["));
         assert!(profile.contains("extra_prefixes = [\"ctrl+s\"]"));
 
-        let keybinds = keybindings_from_profile_toml(&profile).unwrap();
+        let keybinds = keybindings_from_profile_toml(&profile, Vec::new()).unwrap();
         assert_eq!(keybinds.prefix, config.prefix_keys());
     }
 

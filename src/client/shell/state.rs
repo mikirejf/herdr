@@ -257,6 +257,8 @@ pub(crate) enum ClientShellAction {
         target: Option<ClientEndpointFocusTarget>,
     },
     ReplayMouse(Vec<crossterm::event::MouseEvent>),
+    /// Start a client-run custom command on this machine; no endpoint request.
+    RunClientCommand(ClientCommandRun),
     Keybind(crate::input::KeybindAction),
 }
 

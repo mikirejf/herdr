@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 mod actions;
 mod agent_sidebar;
 mod aggregate_navigation;
+mod client_commands;
+pub(crate) use client_commands::ClientCommandRun;
 mod machine_diagnostics;
 mod workspace_navigation;
 use workspace_navigation::{PendingWorkspaceHighlight, WorkspaceNavigationTarget};

@@ -101,6 +101,24 @@ pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Co
     process
 }
 
+/// Starts a custom shell command with no stdio. The caller keeps the child and reaps it.
+pub(crate) fn spawn_detached_custom_command(
+    command: &str,
+    env: impl IntoIterator<Item = (String, String)>,
+    cwd: Option<&std::path::Path>,
+) -> std::io::Result<std::process::Child> {
+    let mut process = detached_custom_command_process(command);
+    process
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .envs(env);
+    if let Some(cwd) = cwd {
+        process.current_dir(cwd);
+    }
+    process.spawn()
+}
+
 pub(crate) fn pane_custom_command_pty_builder(command: &str) -> portable_pty::CommandBuilder {
     pane_custom_command_pty_builder_platform(command)
 }

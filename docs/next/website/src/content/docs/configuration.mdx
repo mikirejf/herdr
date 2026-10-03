@@ -246,6 +246,33 @@ Custom commands receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ACTIVE_WOR
 
 On Windows, custom command strings use `cmd.exe /d /c`, so environment variables use `%HERDR_BIN_PATH%` syntax. To run PowerShell syntax, invoke it explicitly, for example `powershell.exe -NoProfile -Command "..."`.
 
+### Run a shell command on your own machine
+
+A shell command runs on the machine that hosts the Herdr server. When you attach to a remote machine, that is the remote machine. Add `run_on = "client"` to run the command on the machine where you run the Herdr client instead, for example to open an editor or a browser on your laptop:
+
+```toml
+[[keys.command]]
+key = "prefix+o"
+type = "shell"
+command = "open \"$HERDR_ACTIVE_PANE_CWD\""
+description = "open the pane folder"
+run_on = "client"
+```
+
+`run_on` accepts `"server"` (the default) and `"client"`. `run_on = "client"` needs `type = "shell"`. Herdr ignores other types that set it and reports a config diagnostic.
+
+A client command starts on your machine with your client's environment, whichever machine you are looking at. It receives these values when they are available:
+
+- `HERDR_ACTIVE_WORKSPACE_ID`, `HERDR_ACTIVE_TAB_ID`, and `HERDR_ACTIVE_PANE_ID` name the focused workspace, tab, and pane.
+- `HERDR_ACTIVE_PANE_CWD` is the working directory of the focused pane. When that pane is on another machine, the path exists there, not on your machine.
+- `HERDR_ACTIVE_MACHINE` is `local` when you look at the local machine. For a remote machine it is the SSH target of that machine, for example `dev@build.example`.
+
+A client command does not receive `HERDR_SOCKET_PATH` or `HERDR_BIN_PATH` from Herdr. It runs from the focused pane's working directory only when that pane is on your own machine and the directory exists. Otherwise it runs from your home directory.
+
+Client commands work in the same way when you use the local machine, a remote machine, or the machine list. They keep working after a config reload or a machine switch. The server never sees them, so they do not appear in its command list.
+
+If a client command and a server command use the same key, the client command wins.
+
 ## Theme
 
 Choose a built-in theme:

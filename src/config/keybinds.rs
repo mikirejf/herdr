@@ -118,6 +118,17 @@ pub enum CommandKeybindType {
     PluginAction,
 }
 
+/// The machine that executes a custom command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandRunOn {
+    /// The herdr server that owns the focused pane.
+    #[default]
+    Server,
+    /// The machine that runs the attached herdr TUI client.
+    Client,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommandKeybindConfig {
@@ -128,6 +139,8 @@ pub struct CommandKeybindConfig {
     /// Command execution mode. Default: "shell".
     #[serde(rename = "type")]
     pub action_type: CommandKeybindType,
+    /// Machine that runs the command. Only `type = "shell"` supports "client". Default: "server".
+    pub run_on: CommandRunOn,
     /// Optional user-defined description for this custom command.
     pub description: Option<String>,
     /// Optional popup width as cells or a percentage string when type = "popup".
@@ -142,6 +155,7 @@ impl Default for CommandKeybindConfig {
             key: BindingConfig::empty(),
             command: String::new(),
             action_type: CommandKeybindType::Shell,
+            run_on: CommandRunOn::Server,
             description: None,
             width: None,
             height: None,
@@ -331,6 +345,7 @@ pub struct CustomCommandKeybind {
     pub label: String,
     pub command: String,
     pub action: CustomCommandAction,
+    pub run_on: CommandRunOn,
     pub description: Option<String>,
     pub width: Option<PopupSize>,
     pub height: Option<PopupSize>,
@@ -496,8 +511,37 @@ impl BindingRegistry {
 }
 
 impl Config {
+    /// Keybinds as the herdr server resolves them. Commands that run on the client are
+    /// validated but never registered.
     pub(super) fn validated_keybinds(
         &self,
+    ) -> (Option<String>, Vec<KeyCombo>, Vec<String>, Keybinds) {
+        self.validated_keybinds_for(CommandRunOn::Server)
+    }
+
+    /// Keybinds as the attached TUI client resolves them: every command in `keys.command`
+    /// is registered, in config order.
+    pub(crate) fn live_client_keybinds_with_diagnostics(
+        &self,
+    ) -> Result<(LiveKeybindConfig, Vec<String>), Vec<String>> {
+        let (prefix_diag, prefix, keybind_diags, keybinds) =
+            self.validated_keybinds_for(CommandRunOn::Client);
+        match prefix_diag {
+            Some(prefix_diag) => Err(std::iter::once(prefix_diag).chain(keybind_diags).collect()),
+            None => Ok((LiveKeybindConfig { prefix, keybinds }, keybind_diags)),
+        }
+    }
+
+    /// The client's keybinds even when the prefix is invalid, like [`Config::keybinds`].
+    pub(crate) fn client_keybinds(&self) -> Keybinds {
+        self.validated_keybinds_for(CommandRunOn::Client).3
+    }
+
+    /// `resolver` is the side that resolves the keys. The server skips commands that run on
+    /// the client so they never take a key from its own bindings; the client registers all.
+    fn validated_keybinds_for(
+        &self,
+        resolver: CommandRunOn,
     ) -> (Option<String>, Vec<KeyCombo>, Vec<String>, Keybinds) {
         let (prefix_keys, prefix_diag, mut diagnostics) = parse_prefix_keys(&self.keys.prefix);
         if let Some(diag) = &prefix_diag {
@@ -765,6 +809,7 @@ impl Config {
             if source == BindingSource::User {
                 append_custom_command_bindings(
                     self,
+                    resolver,
                     &mut keybinds,
                     &mut registry,
                     &mut diagnostics,
@@ -800,10 +845,20 @@ fn reserve_navigate_runtime_keys(registry: &mut BindingRegistry) {
 
 fn append_custom_command_bindings(
     config: &Config,
+    resolver: CommandRunOn,
     keybinds: &mut Keybinds,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
 ) {
+    // The server does not register client-run keys, so it checks them against a registry of
+    // their own. That keeps typos in them reported by `herdr config check` on every machine.
+    let mut client_only_registry = (resolver == CommandRunOn::Server).then(|| {
+        let mut scratch =
+            BindingRegistry::new(registry.prefix_combos.clone(), registry.prefix_source);
+        scratch.reserve_prefix_keys("keys.prefix", registry.prefix_source);
+        scratch
+    });
+
     for (index, command) in config.keys.command.iter().enumerate() {
         let key_field = format!("keys.command[{index}].key");
         let command_field = format!("keys.command[{index}].command");
@@ -815,14 +870,28 @@ fn append_custom_command_bindings(
             continue;
         }
 
+        let runs_on_client = command.run_on == CommandRunOn::Client;
+        if runs_on_client && command.action_type != CommandKeybindType::Shell {
+            let diag = format!(
+                "run_on = \"client\" needs type = \"shell\": keys.command[{index}]; disabling custom command"
+            );
+            warn!(message = %diag, "config diagnostic");
+            diagnostics.push(diag);
+            continue;
+        }
+
+        let target_registry = match client_only_registry.as_mut() {
+            Some(scratch) if runs_on_client => scratch,
+            _ => &mut *registry,
+        };
         let bindings = parse_action_bindings(
             &key_field,
             &command.key,
-            registry,
+            target_registry,
             diagnostics,
             BindingSource::User,
         );
-        if bindings.bindings.is_empty() {
+        if bindings.bindings.is_empty() || (runs_on_client && resolver == CommandRunOn::Server) {
             continue;
         }
 
@@ -850,6 +919,7 @@ fn append_custom_command_bindings(
             label,
             command: command.command.clone(),
             action,
+            run_on: command.run_on,
             description: command.description.clone(),
             width,
             height,
@@ -2460,5 +2530,129 @@ width = "80%"
             .collect_diagnostics()
             .iter()
             .any(|diag| diag.contains("popup size on non-popup custom command")));
+    }
+
+    fn run_on_config(toml_text: &str) -> Config {
+        toml::from_str(toml_text).unwrap()
+    }
+
+    #[test]
+    fn custom_command_runs_on_the_server_by_default() {
+        let config = run_on_config(
+            r#"
+[[keys.command]]
+key = "prefix+g"
+command = "lazygit"
+"#,
+        );
+
+        assert_eq!(config.keys.command[0].run_on, CommandRunOn::Server);
+        assert_eq!(
+            config.keybinds().custom_commands[0].run_on,
+            CommandRunOn::Server
+        );
+    }
+
+    #[test]
+    fn run_on_client_is_parsed_for_shell_commands() {
+        let config = run_on_config(
+            r#"
+[[keys.command]]
+key = "prefix+u"
+command = "open-editor"
+run_on = "client"
+"#,
+        );
+
+        assert_eq!(config.keys.command[0].run_on, CommandRunOn::Client);
+        assert!(config.collect_diagnostics().is_empty());
+        let (live, _) = config.live_client_keybinds_with_diagnostics().unwrap();
+        assert_eq!(live.keybinds.custom_commands.len(), 1);
+        assert_eq!(
+            live.keybinds.custom_commands[0].run_on,
+            CommandRunOn::Client
+        );
+        assert_eq!(live.keybinds.custom_commands[0].command, "open-editor");
+    }
+
+    #[test]
+    fn run_on_client_is_rejected_for_other_command_types() {
+        for command_type in ["pane", "popup", "plugin_action"] {
+            let config = run_on_config(&format!(
+                r#"
+[[keys.command]]
+key = "prefix+u"
+command = "x"
+type = "{command_type}"
+run_on = "client"
+"#
+            ));
+
+            assert!(config
+                .collect_diagnostics()
+                .iter()
+                .any(|diag| diag.contains("run_on = \"client\" needs type = \"shell\"")));
+            assert!(config.keybinds().custom_commands.is_empty());
+            let (live, _) = config.live_client_keybinds_with_diagnostics().unwrap();
+            assert!(live.keybinds.custom_commands.is_empty());
+        }
+    }
+
+    #[test]
+    fn server_never_registers_client_run_commands() {
+        let config = run_on_config(
+            r#"
+[[keys.command]]
+key = "prefix+g"
+command = "client-side"
+run_on = "client"
+
+[[keys.command]]
+key = "prefix+h"
+command = "server-side"
+"#,
+        );
+
+        let server = config.keybinds();
+        assert_eq!(server.custom_commands.len(), 1);
+        assert_eq!(server.custom_commands[0].command, "server-side");
+        let (client, _) = config.live_client_keybinds_with_diagnostics().unwrap();
+        assert_eq!(client.keybinds.custom_commands.len(), 2);
+    }
+
+    #[test]
+    fn client_run_command_does_not_take_a_default_key_from_the_server() {
+        let config = run_on_config(
+            r#"
+[[keys.command]]
+key = "prefix+n"
+command = "client-side"
+run_on = "client"
+"#,
+        );
+
+        assert_eq!(
+            config.keybinds().next_tab.label().as_deref(),
+            Some("prefix+n")
+        );
+        let (client, _) = config.live_client_keybinds_with_diagnostics().unwrap();
+        assert!(client.keybinds.next_tab.bindings.is_empty());
+    }
+
+    #[test]
+    fn server_still_reports_a_bad_key_on_a_client_run_command() {
+        let config = run_on_config(
+            r#"
+[[keys.command]]
+key = "prefix+ctrl+nonsense+"
+command = "client-side"
+run_on = "client"
+"#,
+        );
+
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("keys.command[0].key")));
     }
 }

@@ -15,6 +15,35 @@ pub(super) fn merged_config_diagnostic(
     }
 }
 
+/// The commands the client runs itself, in config order.
+fn client_run_commands(
+    keys: &crate::config::KeysConfig,
+) -> Vec<crate::config::CommandKeybindConfig> {
+    keys.command
+        .iter()
+        .filter(|command| command.run_on == crate::config::CommandRunOn::Client)
+        .cloned()
+        .collect()
+}
+
+/// A config whose commands are the client-run ones from `keys`, then `server_commands`. The
+/// keybind resolver is first-wins, so a client-run command keeps a key that a server command
+/// also asks for.
+fn client_view_config(
+    keys: &crate::config::KeysConfig,
+    server_commands: Vec<crate::config::CommandKeybindConfig>,
+) -> Config {
+    let mut config = Config {
+        keys: keys.clone(),
+        ..Default::default()
+    };
+    config.keys.command = client_run_commands(keys)
+        .into_iter()
+        .chain(server_commands)
+        .collect();
+    config
+}
+
 fn machine_focus_colors(
     configured: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, ratatui::style::Color> {
@@ -125,6 +154,7 @@ impl ClientShellState {
 impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
+        let keybind_view = client_view_config(&config.keys, Vec::new());
         Self {
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
@@ -150,12 +180,12 @@ impl ClientShellConfig {
             theme_runtime,
             palette: crate::app::client_palette_from_config(config),
             machine_focus_colors: machine_focus_colors(&config.ui.machine_focus_colors),
-            keybinds: config
-                .live_keybinds_with_diagnostics()
+            keybinds: keybind_view
+                .live_client_keybinds_with_diagnostics()
                 .map(|(keybinds, _diagnostics)| keybinds)
                 .unwrap_or_else(|_diagnostics| LiveKeybindConfig {
-                    prefix: config.prefix_keys(),
-                    keybinds: config.keybinds(),
+                    prefix: keybind_view.prefix_keys(),
+                    keybinds: keybind_view.client_keybinds(),
                 }),
             local_keys: config.keys.clone(),
             keybinding_source: ClientShellKeybindingSource::Local,
@@ -189,7 +219,10 @@ impl ClientShellConfig {
 
     pub(crate) fn with_keybinding_source(mut self, source: ClientShellKeybindingSource) -> Self {
         self.keybinding_source = source;
-        self.keybinds.keybinds.custom_commands.clear();
+        self.keybinds
+            .keybinds
+            .custom_commands
+            .retain(|command| command.run_on == crate::config::CommandRunOn::Client);
         self
     }
 
@@ -223,14 +256,11 @@ impl ClientShellConfig {
         let mut keybinds = match self.keybinding_source {
             ClientShellKeybindingSource::Endpoint => crate::config::keybindings_from_profile_toml(
                 profile.ok_or("endpoint did not publish its keybindings")?,
+                client_run_commands(&self.local_keys),
             )?,
             ClientShellKeybindingSource::RemoteLocal => return Ok(()),
             ClientShellKeybindingSource::Local => {
-                let mut config = crate::config::Config {
-                    keys: self.local_keys.clone(),
-                    ..Default::default()
-                };
-                config.keys.command = commands
+                let server_commands = commands
                     .iter()
                     .filter_map(|command| {
                         let action_type = match command.action {
@@ -258,33 +288,56 @@ impl ClientShellConfig {
                             // through the shared config collision resolver.
                             command: command.command_id.clone(),
                             action_type,
+                            run_on: crate::config::CommandRunOn::Server,
                             description: command.description.clone(),
                             width: None,
                             height: None,
                         })
                     })
                     .collect();
-                config
-                    .live_keybinds_with_diagnostics()
+                client_view_config(&self.local_keys, server_commands)
+                    .live_client_keybinds_with_diagnostics()
                     .map(|(keybinds, _diagnostics)| keybinds)
                     .map_err(|diagnostics| diagnostics.join("; "))?
             }
         };
         if self.keybinding_source == ClientShellKeybindingSource::Endpoint {
+            // The profile carries no commands, so every command so far runs on the client and
+            // keeps its keys against the endpoint's own commands.
+            let client_run = keybinds.keybinds.custom_commands.clone();
             for command in commands {
                 let Ok(action) = command.action.try_into() else {
                     continue;
+                };
+                let mut bindings =
+                    crate::config::ActionKeybinds::from_labels(&command.binding_labels)?;
+                let published = bindings.bindings.len();
+                bindings.bindings.retain(|binding| {
+                    !client_run.iter().any(|taken| {
+                        taken.bindings.bindings.iter().any(|taken| {
+                            taken.trigger.is_prefix() == binding.trigger.is_prefix()
+                                && crate::config::normalize_key_combo(taken.trigger.combo())
+                                    == crate::config::normalize_key_combo(binding.trigger.combo())
+                        })
+                    })
+                });
+                if bindings.bindings.is_empty() && published > 0 {
+                    continue;
+                }
+                let label = if bindings.bindings.len() == published {
+                    command.binding_label.clone()
+                } else {
+                    bindings.label().unwrap_or_default()
                 };
                 keybinds
                     .keybinds
                     .custom_commands
                     .push(crate::config::CustomCommandKeybind {
-                        bindings: crate::config::ActionKeybinds::from_labels(
-                            &command.binding_labels,
-                        )?,
-                        label: command.binding_label.clone(),
+                        bindings,
+                        label,
                         command: command.command_id.clone(),
                         action,
+                        run_on: crate::config::CommandRunOn::Server,
                         description: command.description.clone(),
                         width: None,
                         height: None,
@@ -305,23 +358,31 @@ impl ClientShellConfig {
         let invalid_section =
             |section: &str| invalid_sections.iter().any(|invalid| invalid == section);
 
-        if !invalid_section("keys")
-            && self.keybinding_source != ClientShellKeybindingSource::Endpoint
-        {
-            match config.live_keybinds_with_diagnostics() {
-                Ok((mut keybinds, keybind_diagnostics)) => {
-                    self.local_keys = config.keys.clone();
-                    if self.keybinding_source == ClientShellKeybindingSource::RemoteLocal {
-                        keybinds.keybinds.custom_commands.clear();
+        if !invalid_section("keys") {
+            if self.keybinding_source == ClientShellKeybindingSource::Endpoint {
+                // The endpoint owns the keybinds. The client-run commands of the new config join
+                // them when the snapshot keybinds are applied.
+                self.local_keys = config.keys.clone();
+            } else {
+                // The server's view reports every command in the file, client-run ones included.
+                // The keybinds themselves hold only client-run commands; the endpoint's commands
+                // come with the next snapshot.
+                match config.live_keybinds_with_diagnostics() {
+                    Ok((_, keybind_diagnostics)) => {
+                        self.local_keys = config.keys.clone();
+                        if let Ok((keybinds, _)) = client_view_config(&config.keys, Vec::new())
+                            .live_client_keybinds_with_diagnostics()
+                        {
+                            self.keybinds = keybinds;
+                        }
+                        diagnostics.extend(keybind_diagnostics);
                     }
-                    self.keybinds = keybinds;
-                    diagnostics.extend(keybind_diagnostics);
+                    Err(keybind_diagnostics) => diagnostics.extend(
+                        keybind_diagnostics
+                            .into_iter()
+                            .map(|diagnostic| format!("{diagnostic}; kept current keybinds")),
+                    ),
                 }
-                Err(keybind_diagnostics) => diagnostics.extend(
-                    keybind_diagnostics
-                        .into_iter()
-                        .map(|diagnostic| format!("{diagnostic}; kept current keybinds")),
-                ),
             }
         }
 
