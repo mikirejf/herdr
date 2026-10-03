@@ -52,6 +52,15 @@ fn project_state(group_by: SidebarGroupBy) -> (ClientShellState, ClientEndpointI
     remote.boot_id = "remote-boot".into();
     remote.focused_workspace_id = Some("rws_1".into());
     remote.workspaces = vec![workspace("rws_1", Some((DEVKIT, "devkit", true)), true)];
+    remote.pane_focus_style = Some(crate::protocol::ClientShellPaneFocusStyle::new(
+        crate::ui::PaneFocusColors {
+            accent: ratatui::style::Color::Cyan,
+            overlay0: ratatui::style::Color::DarkGray,
+            overlay1: ratatui::style::Color::Gray,
+            surface_dim: ratatui::style::Color::Black,
+        },
+        false,
+    ));
     state.set_endpoint_snapshot(&remote_id, Box::new(remote));
     (state, remote_id)
 }
@@ -112,16 +121,14 @@ fn project_sidebar_groups_machines_and_marks_rows_with_machine_color() {
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     for hit in &state.hits.workspaces {
         let cell = &buffer[(hit.rect.x, hit.rect.y)];
-        if hit.endpoint_id == remote_id {
-            assert_eq!(
-                cell.symbol(),
-                " ",
-                "Build has no color, so its bar is blank"
-            );
+        assert_eq!(cell.symbol(), "▌");
+        // Build has no configured color, so its bar takes its own focus accent.
+        let expected = if hit.endpoint_id == remote_id {
+            ratatui::style::Color::Cyan
         } else {
-            assert_eq!(cell.symbol(), "▌");
-            assert_eq!(cell.fg, ratatui::style::Color::Magenta);
-        }
+            ratatui::style::Color::Magenta
+        };
+        assert_eq!(cell.fg, expected);
     }
 }
 

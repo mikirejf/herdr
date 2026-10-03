@@ -4,8 +4,7 @@
 use super::render::{put_text, ShellRenderState};
 use super::*;
 
-/// Marks the machine a space runs on; a machine without a configured color leaves the column
-/// blank so rows stay aligned.
+/// Marks the machine a space runs on, in the color of that machine's focused pane border.
 const MACHINE_BAR: &str = "▌";
 
 pub(super) enum ProjectRow {
@@ -426,7 +425,20 @@ fn render_workspace(
     state: &ShellRenderState<'_>,
 ) {
     let palette = &config.palette;
-    if let Some(color) = config.machine_focus_colors.get(&endpoint.label) {
+    // The bar matches the focused pane border: the configured machine color, else the
+    // machine's own focus accent.
+    let color = config
+        .machine_focus_colors
+        .get(&endpoint.label)
+        .copied()
+        .or_else(|| {
+            endpoint
+                .snapshot
+                .as_deref()?
+                .pane_focus_style
+                .map(|style| style.colors().accent)
+        });
+    if let Some(color) = color {
         for y in rect.y..rect.bottom() {
             put_text(
                 buffer,
@@ -434,7 +446,7 @@ fn render_workspace(
                 y,
                 u16::from(rect.width > 0),
                 MACHINE_BAR,
-                Style::default().fg(*color),
+                Style::default().fg(color),
             );
         }
     }
