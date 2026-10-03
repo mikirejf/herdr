@@ -994,8 +994,15 @@ fn add_agents(state: &mut ClientShellState, remote_name: &str) {
     }
 }
 
+/// The text of the first line of an agent row, from the row's left edge to its right edge.
+fn first_line(buffer: &ratatui::buffer::Buffer, rect: ratatui::layout::Rect) -> String {
+    (rect.x..rect.right())
+        .map(|x| buffer[(x, rect.y)].symbol().to_owned())
+        .collect()
+}
+
 #[test]
-fn project_mode_marks_remote_agent_rows_with_the_machine_dot() {
+fn project_mode_marks_remote_agent_rows_with_the_remote_marker() {
     let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
     add_agents(&mut state, "remote-agent");
     state
@@ -1006,21 +1013,26 @@ fn project_mode_marks_remote_agent_rows_with_the_machine_dot() {
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     assert_eq!(state.hits.endpoint_agents.len(), 2);
     for (rect, endpoint_id, _) in &state.hits.endpoint_agents {
-        let cell = &buffer[(rect.right() - 1, rect.y)];
+        let line = first_line(&buffer, *rect);
         if endpoint_id == &remote_id {
-            assert_eq!(
-                (cell.symbol(), cell.fg),
-                ("●", ratatui::style::Color::Green)
-            );
-            assert_eq!(buffer[(rect.right() - 2, rect.y)].symbol(), " ");
+            let at = line.find("rws_1 [R]").expect("label then marker");
+            let marker_x = rect.x + (line[..at].chars().count() + "rws_1 ".len()) as u16;
+            for (offset, symbol) in ["[", "R", "]"].into_iter().enumerate() {
+                let cell = &buffer[(marker_x + offset as u16, rect.y)];
+                assert_eq!(
+                    (cell.symbol(), cell.fg),
+                    (symbol, ratatui::style::Color::Green)
+                );
+            }
+            assert_ne!(buffer[(rect.right() - 1, rect.y)].symbol(), "●");
         } else {
-            assert_ne!(cell.symbol(), "●");
+            assert!(!line.contains("[R]"), "{line:?}");
         }
     }
 }
 
 #[test]
-fn remote_agent_dot_falls_back_to_the_machine_focus_accent() {
+fn remote_agent_marker_falls_back_to_the_machine_focus_accent() {
     let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
     add_agents(&mut state, "remote-agent");
     let frame = state.compose(100, 40).expect("project sidebar");
@@ -1031,24 +1043,26 @@ fn remote_agent_dot_falls_back_to_the_machine_focus_accent() {
         .iter()
         .find(|(_, endpoint_id, _)| endpoint_id == &remote_id)
         .expect("remote agent row");
-    let dot = &buffer[(rect.right() - 1, rect.y)];
-    assert_eq!((dot.symbol(), dot.fg), ("●", ratatui::style::Color::Cyan));
+    let line = first_line(&buffer, *rect);
+    let at = line.find("[R]").expect("remote marker");
+    let cell = &buffer[(rect.x + line[..at].chars().count() as u16, rect.y)];
+    assert_eq!((cell.symbol(), cell.fg), ("[", ratatui::style::Color::Cyan));
 }
 
 #[test]
-fn machine_mode_agent_rows_have_no_machine_dot() {
+fn machine_mode_agent_rows_have_no_remote_marker() {
     let (mut state, _) = project_state(SidebarGroupBy::default());
     add_agents(&mut state, "remote-agent");
     let frame = state.compose(100, 40).expect("machine sidebar");
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     assert_eq!(state.hits.endpoint_agents.len(), 2);
     for (rect, _, _) in &state.hits.endpoint_agents {
-        assert_ne!(buffer[(rect.right() - 1, rect.y)].symbol(), "●");
+        assert!(!first_line(&buffer, *rect).contains("[R]"));
     }
 }
 
 #[test]
-fn long_first_lines_are_cut_before_the_machine_dot() {
+fn long_first_lines_are_cut_before_the_remote_marker() {
     let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
     add_agents(&mut state, "remote-agent");
     for endpoint in &mut state.endpoints {
@@ -1065,7 +1079,7 @@ fn long_first_lines_are_cut_before_the_machine_dot() {
         .iter()
         .find(|(_, endpoint_id, _)| endpoint_id == &remote_id)
         .expect("remote agent row");
-    assert_eq!(buffer[(rect.right() - 1, rect.y)].symbol(), "●");
-    assert_eq!(buffer[(rect.right() - 2, rect.y)].symbol(), " ");
-    assert_ne!(buffer[(rect.right() - 3, rect.y)].symbol(), " ");
+    let line = first_line(&buffer, *rect);
+    assert!(line.ends_with(" [R]"), "{line:?}");
+    assert!(!line.ends_with("  [R]"), "{line:?}");
 }

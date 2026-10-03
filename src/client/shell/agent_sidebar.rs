@@ -93,7 +93,7 @@ pub(super) fn render_agent_panel(
         |row| row.rows.len(),
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config, false);
+            render_agent_row(buffer, rect, row, config, None);
         },
     );
 }
@@ -335,12 +335,15 @@ pub(super) fn agent_row(
     })
 }
 
+/// Follows the first line of an agent on another machine, in that machine's color.
+const REMOTE_MARKER: &str = " [R]";
+
 pub(super) fn render_agent_row(
     buffer: &mut Buffer,
     rect: Rect,
     row: &AgentRow,
     config: &ClientShellConfig,
-    reserve_machine_dot: bool,
+    machine_marker: Option<ratatui::style::Color>,
 ) {
     let palette = &config.palette;
     let row_style = if row.focused {
@@ -374,9 +377,9 @@ pub(super) fn render_agent_row(
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
-        // The first line keeps a space and a column free for the machine dot.
-        let dot_columns = if index == 0 && reserve_machine_dot {
-            2
+        let marker = machine_marker.filter(|_| index == 0);
+        let marker_columns = if marker.is_some() {
+            REMOTE_MARKER.chars().count() as u16
         } else {
             0
         };
@@ -390,25 +393,19 @@ pub(super) fn render_agent_row(
             palette,
             rect.width
                 .saturating_sub(indent as u16)
-                .saturating_sub(dot_columns) as usize,
+                .saturating_sub(marker_columns) as usize,
         ));
+        if let Some(color) = marker {
+            spans.push(ratatui::text::Span::styled(
+                REMOTE_MARKER,
+                Style::default().fg(color),
+            ));
+        }
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
     }
-}
-
-/// Draws the machine dot in the last column of the row's first line.
-pub(super) fn render_machine_dot(buffer: &mut Buffer, rect: Rect, color: ratatui::style::Color) {
-    put_text(
-        buffer,
-        rect.right().saturating_sub(1),
-        rect.y,
-        u16::from(rect.width > 0),
-        super::project_sidebar::MACHINE_DOT,
-        Style::default().fg(color),
-    );
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

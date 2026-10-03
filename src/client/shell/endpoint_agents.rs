@@ -77,7 +77,7 @@ pub(super) fn render_expanded(
                 rect,
                 &row.agent,
                 config,
-                row.machine_dot.is_some(),
+                row.machine_marker,
             );
             if row.stale {
                 buffer.set_style(
@@ -86,9 +86,6 @@ pub(super) fn render_expanded(
                         .fg(config.palette.overlay0)
                         .add_modifier(Modifier::DIM),
                 );
-            }
-            if let Some(color) = row.machine_dot {
-                super::agent_sidebar::render_machine_dot(buffer, rect, color);
             }
             hits.endpoint_agents
                 .push((rect, row.endpoint_id.clone(), row.agent.pane_id.clone()));
@@ -135,8 +132,8 @@ struct EndpointAgentRow {
     endpoint_id: ClientEndpointId,
     machine_label: String,
     stale: bool,
-    /// Project mode only: the color of the dot that marks an agent on another machine.
-    machine_dot: Option<ratatui::style::Color>,
+    /// Project mode only: the color of the `[R]` that marks an agent on another machine.
+    machine_marker: Option<ratatui::style::Color>,
     agent: super::agent_sidebar::AgentRow,
 }
 
@@ -189,7 +186,7 @@ fn agent_rows(
             endpoint_id: row.endpoint.endpoint_id.clone(),
             machine_label: row.endpoint.label.to_owned(),
             stale: row.endpoint.stale(),
-            machine_dot: endpoints
+            machine_marker: endpoints
                 .iter()
                 .find(|endpoint| endpoint.endpoint_id == *row.endpoint.endpoint_id)
                 .filter(|endpoint| {

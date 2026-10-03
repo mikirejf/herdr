@@ -12,7 +12,7 @@ use ratatui::{
 
 /// Marks a space that runs on a remote machine, in the color of that machine's focused pane
 /// border.
-pub(super) const MACHINE_DOT: &str = "●";
+const MACHINE_DOT: &str = "●";
 
 /// Blank rows between one project and the next, and before the spaces outside a repository.
 const PROJECT_GAP: u16 = 1;
