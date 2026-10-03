@@ -261,5 +261,6 @@ mod mobile;
 mod mouse_selection;
 mod pane_focus;
 mod popup_focus_projection;
+mod project_sidebar;
 mod startup_overlays;
 mod tab_preview;

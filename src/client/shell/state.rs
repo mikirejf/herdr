@@ -21,6 +21,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) mobile_width_threshold: u16,
     pub(super) tab_bar_position: TabBarPositionConfig,
     pub(super) hide_tab_bar_when_single_tab: bool,
+    pub(super) sidebar_group_by: crate::config::SidebarGroupBy,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
@@ -86,6 +87,8 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    /// Project headers in project grouping, keyed by worktree key.
+    pub(super) projects: Vec<(Rect, String)>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -870,6 +873,8 @@ pub(crate) struct ClientShellState {
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+    /// Collapsed projects in project grouping, keyed by worktree key across all machines.
+    pub(super) collapsed_projects: HashSet<String>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
@@ -1042,6 +1047,7 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            collapsed_projects: preferences.collapsed_projects.into_iter().collect(),
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
@@ -1153,13 +1159,24 @@ impl ClientShellState {
         }
     }
 
+    pub(super) fn project_grouping(&self) -> bool {
+        self.config.sidebar_group_by == crate::config::SidebarGroupBy::Project
+    }
+
+    /// Whether the worktree group `key` is collapsed in the active sidebar grouping. Project
+    /// grouping spans machines, so it ignores `endpoint_id`.
     pub(super) fn group_is_collapsed(&self, endpoint_id: &ClientEndpointId, key: &str) -> bool {
+        if self.project_grouping() {
+            return self.collapsed_projects.contains(key);
+        }
         self.collapsed_groups_for_endpoint(endpoint_id)
             .is_some_and(|groups| groups.contains(key))
     }
 
     pub(super) fn toggle_collapsed_group(&mut self, endpoint_id: &ClientEndpointId, key: String) {
-        let groups = if endpoint_id.is_local() {
+        let groups = if self.project_grouping() {
+            &mut self.collapsed_projects
+        } else if endpoint_id.is_local() {
             &mut self.collapsed_groups
         } else {
             self.remote_collapsed_groups
@@ -1196,11 +1213,30 @@ impl ClientShellState {
         {
             return;
         }
-        let target = self.snapshot.as_deref().and_then(|snapshot| {
-            self.navigation_workspace_entries(snapshot)
-                .iter()
-                .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
-        });
+        let target = if self.project_grouping() && !self.mobile_layout_active() {
+            super::project_sidebar::project_rows(
+                &self.endpoints,
+                &self.active_endpoint_id,
+                &self.collapsed_projects,
+            )
+            .iter()
+            .position(|row| {
+                let super::project_sidebar::ProjectRow::Workspace { endpoint, entry } = row else {
+                    return false;
+                };
+                let endpoint = &self.endpoints[*endpoint];
+                endpoint.endpoint_id == self.active_endpoint_id
+                    && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                        snapshot.workspaces[entry.index].workspace_id == workspace_id
+                    })
+            })
+        } else {
+            self.snapshot.as_deref().and_then(|snapshot| {
+                self.navigation_workspace_entries(snapshot)
+                    .iter()
+                    .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
+            })
+        };
         if let Some(target) = target {
             self.workspace_scroll = target.min(self.hits.workspace_max_scroll);
         }

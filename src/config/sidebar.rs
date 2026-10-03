@@ -478,9 +478,21 @@ impl Default for SpacesSidebarConfig {
     }
 }
 
+/// How the expanded desktop sidebar groups spaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarGroupBy {
+    /// Each machine lists its own spaces under its machine row.
+    #[default]
+    Machine,
+    /// Spaces from every machine are grouped by git repository.
+    Project,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SidebarConfig {
+    pub group_by: SidebarGroupBy,
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
 }
@@ -514,6 +526,17 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+        assert_eq!(config.group_by, SidebarGroupBy::Machine);
+    }
+
+    #[test]
+    fn group_by_parses_project_and_rejects_unknown_values() {
+        let config: crate::config::Config =
+            toml::from_str("[ui.sidebar]\ngroup_by = \"project\"\n").expect("project grouping");
+        assert_eq!(config.ui.sidebar.group_by, SidebarGroupBy::Project);
+        assert!(
+            toml::from_str::<crate::config::Config>("[ui.sidebar]\ngroup_by = \"repo\"\n").is_err()
+        );
     }
 
     #[test]

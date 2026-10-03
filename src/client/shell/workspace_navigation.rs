@@ -96,9 +96,39 @@ impl ClientShellState {
         })
     }
 
-    pub(super) fn move_navigate_workspace(&mut self, delta: isize) {
-        let mobile = self.mobile_layout_active();
-        let surface_available = self.snapshot.is_some() && self.pane_surface.is_some();
+    /// Online workspaces in project-grouping sidebar order across machines.
+    pub(super) fn project_navigation_targets(
+        &self,
+        collapsed_projects: &HashSet<String>,
+    ) -> Vec<WorkspaceNavigationTarget> {
+        super::project_sidebar::project_workspace_order(
+            &self.endpoints,
+            &self.active_endpoint_id,
+            collapsed_projects,
+        )
+        .into_iter()
+        .filter_map(|(endpoint_index, workspace_index)| {
+            let endpoint = &self.endpoints[endpoint_index];
+            if endpoint.status != ClientEndpointStatus::Online {
+                return None;
+            }
+            let snapshot = endpoint.snapshot.as_deref()?;
+            Some(WorkspaceNavigationTarget {
+                endpoint_id: endpoint.endpoint_id.clone(),
+                workspace_id: snapshot.workspaces[workspace_index].workspace_id.clone(),
+                boot_id: snapshot.boot_id.clone(),
+                generation: endpoint.snapshot_generation,
+            })
+        })
+        .collect()
+    }
+
+    /// Online workspaces in machine-grouping order: each machine's list in turn.
+    fn machine_navigation_targets(
+        &self,
+        mobile: bool,
+        surface_available: bool,
+    ) -> Vec<WorkspaceNavigationTarget> {
         let empty_collapsed_groups = HashSet::new();
         let mut targets = Vec::new();
         for endpoint in &self.endpoints {
@@ -137,6 +167,19 @@ impl ClientShellState {
                 });
             }
         }
+        targets
+    }
+
+    pub(super) fn move_navigate_workspace(&mut self, delta: isize) {
+        let mobile = self.mobile_layout_active();
+        let surface_available = self.snapshot.is_some() && self.pane_surface.is_some();
+        // The collapsed rail and the mobile switcher list each machine in turn in every grouping.
+        let flat_sidebar = self.sidebar_collapsed && !mobile && surface_available;
+        let mut targets = if self.project_grouping() && !mobile && !flat_sidebar {
+            self.project_navigation_targets(&self.collapsed_projects)
+        } else {
+            self.machine_navigation_targets(mobile, surface_available)
+        };
         if targets.is_empty() {
             return;
         }

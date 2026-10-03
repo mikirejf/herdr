@@ -30,6 +30,7 @@ mod overlay_input;
 mod pane_focus;
 use pane_focus::PredictedPaneFocus;
 mod preferences;
+mod project_sidebar;
 mod render;
 mod scroll;
 mod settings;

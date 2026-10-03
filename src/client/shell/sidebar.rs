@@ -215,6 +215,111 @@ pub(crate) fn render_sidebar(
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    if config.sidebar_group_by == crate::config::SidebarGroupBy::Project {
+        super::super::project_sidebar::render_list(
+            buffer,
+            workspace_area,
+            Some(snapshot),
+            config,
+            state,
+            hits,
+        );
+    } else {
+        render_space_list(buffer, workspace_area, snapshot, config, state, hits);
+    }
+
+    let footer_y = workspace_area.bottom().saturating_sub(1);
+    if config.mouse_capture {
+        hits.new_workspace = Rect::new(
+            workspace_area.x,
+            footer_y,
+            5.min(workspace_area.width),
+            u16::from(workspace_area.height > 0),
+        );
+        put_text(
+            buffer,
+            workspace_area.x,
+            footer_y,
+            workspace_area.width,
+            " new",
+            Style::default().fg(palette.overlay0),
+        );
+        let attention = super::super::global_menu::global_menu_attention(snapshot);
+        let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);
+        hits.global_launcher = Rect::new(
+            workspace_area.right().saturating_sub(launcher_width),
+            footer_y,
+            launcher_width,
+            1,
+        );
+        if attention {
+            let start_x = workspace_area.right().saturating_sub(6);
+            put_text(
+                buffer,
+                start_x,
+                footer_y,
+                2,
+                "● ",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            put_text(
+                buffer,
+                start_x.saturating_add(2),
+                footer_y,
+                4,
+                "menu",
+                Style::default().fg(palette.overlay0),
+            );
+        } else {
+            put_right_text(
+                buffer,
+                workspace_area,
+                footer_y,
+                "menu",
+                Style::default().fg(palette.overlay0),
+            );
+        }
+    }
+
+    super::render_agent_panel(
+        buffer,
+        detail_area,
+        snapshot,
+        config,
+        state.endpoints,
+        state.active_endpoint_id,
+        state.agent_scroll,
+        hits,
+    );
+
+    hits.sidebar_toggle = Rect::new(
+        area.right().saturating_sub(2),
+        area.bottom().saturating_sub(1),
+        u16::from(area.width > 1),
+        u16::from(area.height > 0),
+    );
+    put_text(
+        buffer,
+        hits.sidebar_toggle.x,
+        hits.sidebar_toggle.y,
+        hits.sidebar_toggle.width,
+        "«",
+        Style::default().fg(palette.overlay0),
+    );
+}
+
+/// Draws the `spaces` section title and list for a single machine, leaving the footer row.
+fn render_space_list(
+    buffer: &mut Buffer,
+    workspace_area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    state: &mut ShellRenderState<'_>,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
     put_text(
         buffer,
         workspace_area.x,
@@ -374,87 +479,6 @@ pub(crate) fn render_sidebar(
             Style::default().fg(palette.accent),
         );
     }
-
-    let footer_y = workspace_area.bottom().saturating_sub(1);
-    if config.mouse_capture {
-        hits.new_workspace = Rect::new(
-            workspace_area.x,
-            footer_y,
-            5.min(workspace_area.width),
-            u16::from(workspace_area.height > 0),
-        );
-        put_text(
-            buffer,
-            workspace_area.x,
-            footer_y,
-            workspace_area.width,
-            " new",
-            Style::default().fg(palette.overlay0),
-        );
-        let attention = super::super::global_menu::global_menu_attention(snapshot);
-        let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);
-        hits.global_launcher = Rect::new(
-            workspace_area.right().saturating_sub(launcher_width),
-            footer_y,
-            launcher_width,
-            1,
-        );
-        if attention {
-            let start_x = workspace_area.right().saturating_sub(6);
-            put_text(
-                buffer,
-                start_x,
-                footer_y,
-                2,
-                "● ",
-                Style::default()
-                    .fg(palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            );
-            put_text(
-                buffer,
-                start_x.saturating_add(2),
-                footer_y,
-                4,
-                "menu",
-                Style::default().fg(palette.overlay0),
-            );
-        } else {
-            put_right_text(
-                buffer,
-                workspace_area,
-                footer_y,
-                "menu",
-                Style::default().fg(palette.overlay0),
-            );
-        }
-    }
-
-    super::render_agent_panel(
-        buffer,
-        detail_area,
-        snapshot,
-        config,
-        state.endpoints,
-        state.active_endpoint_id,
-        state.agent_scroll,
-        hits,
-    );
-
-    hits.sidebar_toggle = Rect::new(
-        area.right().saturating_sub(2),
-        area.bottom().saturating_sub(1),
-        u16::from(area.width > 1),
-        u16::from(area.height > 0),
-    );
-    put_text(
-        buffer,
-        hits.sidebar_toggle.x,
-        hits.sidebar_toggle.y,
-        hits.sidebar_toggle.width,
-        "«",
-        Style::default().fg(palette.overlay0),
-    );
 }
 
 pub(crate) fn workspace_entries(

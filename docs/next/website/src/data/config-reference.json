@@ -1055,6 +1055,16 @@
           ]
         },
         {
+          "key": "ui.sidebar.group_by",
+          "type": "enum",
+          "default": "\"machine\"",
+          "description": "Expanded sidebar grouping. machine lists each machine's spaces under its row. project groups spaces from every machine by git repository, marks each row with its machine's ui.machine_focus_colors color, and shows only machines that are not connected as rows.",
+          "values": [
+            "machine",
+            "project"
+          ]
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",

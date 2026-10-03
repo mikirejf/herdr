@@ -253,6 +253,92 @@ pub(super) fn render_expanded(
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    if config.sidebar_group_by == crate::config::SidebarGroupBy::Project {
+        super::project_sidebar::render_list(
+            buffer,
+            workspace_area,
+            active_snapshot,
+            config,
+            state,
+            hits,
+        );
+    } else {
+        render_machine_list(buffer, workspace_area, active_snapshot, config, state, hits);
+    }
+
+    let footer_y = workspace_area.bottom().saturating_sub(1);
+    if config.mouse_capture {
+        let label = format!(" new · {}", active_endpoint_label(state));
+        hits.new_workspace = Rect::new(
+            workspace_area.x,
+            footer_y,
+            display_width(&label).min(workspace_area.width),
+            u16::from(workspace_area.height > 0),
+        );
+        put_text(
+            buffer,
+            workspace_area.x,
+            footer_y,
+            workspace_area.width,
+            &label,
+            Style::default().fg(palette.overlay0),
+        );
+        let attention = active_snapshot.is_some_and(super::global_menu::global_menu_attention);
+        let width = if attention { 8 } else { 6 }.min(workspace_area.width);
+        hits.global_launcher = Rect::new(
+            workspace_area.right().saturating_sub(width),
+            footer_y,
+            width,
+            1,
+        );
+        put_right_text(
+            buffer,
+            workspace_area,
+            footer_y,
+            if attention { "● menu" } else { "menu" },
+            Style::default().fg(if attention {
+                palette.accent
+            } else {
+                palette.overlay0
+            }),
+        );
+    }
+    super::endpoint_agents::render_expanded(
+        buffer,
+        detail_area,
+        active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
+        state.endpoints,
+        state.active_endpoint_id,
+        config,
+        state.agent_scroll,
+        hits,
+    );
+    hits.sidebar_toggle = Rect::new(
+        area.right().saturating_sub(2),
+        area.bottom().saturating_sub(1),
+        u16::from(area.width > 1),
+        u16::from(area.height > 0),
+    );
+    put_text(
+        buffer,
+        hits.sidebar_toggle.x,
+        hits.sidebar_toggle.y,
+        hits.sidebar_toggle.width,
+        "«",
+        Style::default().fg(palette.overlay0),
+    );
+}
+
+/// Draws the `machines` section title and list, leaving the footer row.
+fn render_machine_list(
+    buffer: &mut Buffer,
+    workspace_area: Rect,
+    active_snapshot: Option<&ClientShellSnapshot>,
+    config: &ClientShellConfig,
+    state: &mut ShellRenderState<'_>,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
     put_text(
         buffer,
         workspace_area.x,
@@ -515,68 +601,6 @@ pub(super) fn render_expanded(
         hits.workspace_scrollbar = track;
         super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
     }
-
-    let footer_y = workspace_area.bottom().saturating_sub(1);
-    if config.mouse_capture {
-        let label = format!(" new · {}", active_endpoint_label(state));
-        hits.new_workspace = Rect::new(
-            workspace_area.x,
-            footer_y,
-            display_width(&label).min(workspace_area.width),
-            u16::from(workspace_area.height > 0),
-        );
-        put_text(
-            buffer,
-            workspace_area.x,
-            footer_y,
-            workspace_area.width,
-            &label,
-            Style::default().fg(palette.overlay0),
-        );
-        let attention = active_snapshot.is_some_and(super::global_menu::global_menu_attention);
-        let width = if attention { 8 } else { 6 }.min(workspace_area.width);
-        hits.global_launcher = Rect::new(
-            workspace_area.right().saturating_sub(width),
-            footer_y,
-            width,
-            1,
-        );
-        put_right_text(
-            buffer,
-            workspace_area,
-            footer_y,
-            if attention { "● menu" } else { "menu" },
-            Style::default().fg(if attention {
-                palette.accent
-            } else {
-                palette.overlay0
-            }),
-        );
-    }
-    super::endpoint_agents::render_expanded(
-        buffer,
-        detail_area,
-        active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
-        state.endpoints,
-        state.active_endpoint_id,
-        config,
-        state.agent_scroll,
-        hits,
-    );
-    hits.sidebar_toggle = Rect::new(
-        area.right().saturating_sub(2),
-        area.bottom().saturating_sub(1),
-        u16::from(area.width > 1),
-        u16::from(area.height > 0),
-    );
-    put_text(
-        buffer,
-        hits.sidebar_toggle.x,
-        hits.sidebar_toggle.y,
-        hits.sidebar_toggle.width,
-        "«",
-        Style::default().fg(palette.overlay0),
-    );
 }
 
 fn active_endpoint_label<'a>(state: &'a ShellRenderState<'_>) -> &'a str {
@@ -587,7 +611,7 @@ fn active_endpoint_label<'a>(state: &'a ShellRenderState<'_>) -> &'a str {
         .map_or("Local", |endpoint| endpoint.label.as_str())
 }
 
-fn render_endpoint_row(
+pub(super) fn render_endpoint_row(
     buffer: &mut Buffer,
     rect: Rect,
     marker: &str,

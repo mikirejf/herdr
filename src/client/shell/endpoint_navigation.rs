@@ -12,7 +12,9 @@ impl ClientShellState {
     }
 
     pub(super) fn endpoint_workspace_is_draggable(&self, press: &ClientWorkspacePress) -> bool {
-        press.endpoint_id == self.active_endpoint_id
+        // Project grouping orders spaces by repository, so a drop has no list position to keep.
+        !self.project_grouping()
+            && press.endpoint_id == self.active_endpoint_id
             && self
                 .snapshot
                 .as_deref()
@@ -106,36 +108,44 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) -> bool {
         use crate::input::KeybindAction;
-        if !self.multi_endpoint_active() {
+        let project_grouping = self.project_grouping();
+        if !self.multi_endpoint_active() && !project_grouping {
             return false;
         }
         if matches!(
             action,
             KeybindAction::PreviousWorkspace | KeybindAction::NextWorkspace
         ) {
-            let workspaces = self
-                .endpoints
-                .iter()
-                .filter(|endpoint| endpoint.status == ClientEndpointStatus::Online)
-                .flat_map(|endpoint| {
-                    endpoint
-                        .snapshot
-                        .as_deref()
-                        .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
-                                .into_iter()
-                                .filter_map(|entry| {
-                                    snapshot.workspaces.get(entry.index).map(|workspace| {
-                                        (
-                                            endpoint.endpoint_id.clone(),
-                                            workspace.workspace_id.clone(),
-                                        )
+            // Like machine grouping, cycling reaches spaces hidden inside collapsed groups.
+            let workspaces = if project_grouping {
+                self.project_navigation_targets(&HashSet::new())
+                    .into_iter()
+                    .map(|target| (target.endpoint_id, target.workspace_id))
+                    .collect::<Vec<_>>()
+            } else {
+                self.endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.status == ClientEndpointStatus::Online)
+                    .flat_map(|endpoint| {
+                        endpoint
+                            .snapshot
+                            .as_deref()
+                            .map_or_else(Vec::new, |snapshot| {
+                                render::workspace_entries(snapshot, &HashSet::new())
+                                    .into_iter()
+                                    .filter_map(|entry| {
+                                        snapshot.workspaces.get(entry.index).map(|workspace| {
+                                            (
+                                                endpoint.endpoint_id.clone(),
+                                                workspace.workspace_id.clone(),
+                                            )
+                                        })
                                     })
-                                })
-                                .collect()
-                        })
-                })
-                .collect::<Vec<_>>();
+                                    .collect()
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            };
             if workspaces.is_empty() {
                 return true;
             }
@@ -160,10 +170,14 @@ impl ClientShellState {
             );
             return true;
         }
-        if matches!(
-            action,
-            KeybindAction::PreviousAgent | KeybindAction::NextAgent | KeybindAction::FocusAgent(_)
-        ) {
+        if self.multi_endpoint_active()
+            && matches!(
+                action,
+                KeybindAction::PreviousAgent
+                    | KeybindAction::NextAgent
+                    | KeybindAction::FocusAgent(_)
+            )
+        {
             let agents = super::aggregate_navigation::online_agent_targets(
                 &self.endpoints,
                 &self.active_endpoint_id,

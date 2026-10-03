@@ -322,6 +322,15 @@ To see at a glance which machine you are looking at, give the focused pane's bor
 
 Keys are machine labels exactly as the sidebar shows them: `Local` or a saved machine's label. Matching is case-sensitive, and colors accept the same formats as theme colors. The client you are viewing from applies this setting, so one shared `config.toml` works on every machine. Machines without an entry keep the theme accent.
 
+By default the expanded sidebar lists each machine with its spaces below it. To group spaces from every machine by git repository instead:
+
+```toml
+[ui.sidebar]
+group_by = "project"
+```
+
+Spaces whose checkouts share a repository form one project, also across machines, so a repository checked out at the same path on two machines appears once. A project with two or more spaces gets a header row that collapses it; a project with one space shows as a plain row. Spaces outside a git repository follow after all projects. Each space row starts with a bar in its machine's `ui.machine_focus_colors` color; a machine without a color leaves the bar blank. Machine rows appear only for machines that are not connected, so their status and actions stay reachable. Next and previous workspace keys follow the project order. The default, `"machine"`, keeps the per-machine list.
+
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
 Configure an ordered tmux-style status area at the right edge of the tab row:

@@ -345,6 +345,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # [ui.machine_focus_colors]
 # "devbox" = "#99ffe4"
 
+# Expanded sidebar grouping: "machine" lists each machine's spaces under its row;
+# "project" groups spaces from every machine by git repository and marks each row
+# with its machine's ui.machine_focus_colors color.
+# [ui.sidebar]
+# group_by = "machine"
+
 # Expanded agent rows. Built-ins are state_icon, state_text, machine, workspace, tab,
 # pane, agent, terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.
