@@ -72,13 +72,7 @@ pub(super) fn render_expanded(
         hits,
         |row| row.agent.rows.len(),
         |buffer, rect, row, hits| {
-            super::agent_sidebar::render_agent_row(
-                buffer,
-                rect,
-                &row.agent,
-                config,
-                row.machine_marker,
-            );
+            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, row.remote);
             if row.stale {
                 buffer.set_style(
                     rect,
@@ -132,8 +126,8 @@ struct EndpointAgentRow {
     endpoint_id: ClientEndpointId,
     machine_label: String,
     stale: bool,
-    /// Project mode only: the color of the `[R]` that marks an agent on another machine.
-    machine_marker: Option<ratatui::style::Color>,
+    /// Project mode only: the agent is on another machine and gets an `[R]` marker.
+    remote: bool,
     agent: super::agent_sidebar::AgentRow,
 }
 
@@ -186,14 +180,8 @@ fn agent_rows(
             endpoint_id: row.endpoint.endpoint_id.clone(),
             machine_label: row.endpoint.label.to_owned(),
             stale: row.endpoint.stale(),
-            machine_marker: endpoints
-                .iter()
-                .find(|endpoint| endpoint.endpoint_id == *row.endpoint.endpoint_id)
-                .filter(|endpoint| {
-                    config.sidebar_group_by == crate::config::SidebarGroupBy::Project
-                        && endpoint.endpoint_id != ClientEndpointId::Local
-                })
-                .map(|endpoint| super::project_sidebar::machine_color(endpoint, config)),
+            remote: config.sidebar_group_by == crate::config::SidebarGroupBy::Project
+                && *row.endpoint.endpoint_id != ClientEndpointId::Local,
             agent,
         })
     })

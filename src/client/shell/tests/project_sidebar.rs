@@ -1005,10 +1005,7 @@ fn first_line(buffer: &ratatui::buffer::Buffer, rect: ratatui::layout::Rect) -> 
 fn project_mode_marks_remote_agent_rows_with_the_remote_marker() {
     let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
     add_agents(&mut state, "remote-agent");
-    state
-        .config
-        .machine_focus_colors
-        .insert("Build".into(), ratatui::style::Color::Green);
+    let gray = state.config.palette.overlay0;
     let frame = state.compose(100, 40).expect("project sidebar");
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     assert_eq!(state.hits.endpoint_agents.len(), 2);
@@ -1019,34 +1016,13 @@ fn project_mode_marks_remote_agent_rows_with_the_remote_marker() {
             let marker_x = rect.x + (line[..at].chars().count() + "rws_1 ".len()) as u16;
             for (offset, symbol) in ["[", "R", "]"].into_iter().enumerate() {
                 let cell = &buffer[(marker_x + offset as u16, rect.y)];
-                assert_eq!(
-                    (cell.symbol(), cell.fg),
-                    (symbol, ratatui::style::Color::Green)
-                );
+                assert_eq!((cell.symbol(), cell.fg), (symbol, gray));
             }
             assert_ne!(buffer[(rect.right() - 1, rect.y)].symbol(), "●");
         } else {
             assert!(!line.contains("[R]"), "{line:?}");
         }
     }
-}
-
-#[test]
-fn remote_agent_marker_falls_back_to_the_machine_focus_accent() {
-    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
-    add_agents(&mut state, "remote-agent");
-    let frame = state.compose(100, 40).expect("project sidebar");
-    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
-    let (rect, _, _) = state
-        .hits
-        .endpoint_agents
-        .iter()
-        .find(|(_, endpoint_id, _)| endpoint_id == &remote_id)
-        .expect("remote agent row");
-    let line = first_line(&buffer, *rect);
-    let at = line.find("[R]").expect("remote marker");
-    let cell = &buffer[(rect.x + line[..at].chars().count() as u16, rect.y)];
-    assert_eq!((cell.symbol(), cell.fg), ("[", ratatui::style::Color::Cyan));
 }
 
 #[test]

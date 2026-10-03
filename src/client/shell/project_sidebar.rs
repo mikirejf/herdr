@@ -529,7 +529,7 @@ fn render_workspace(
 
 /// The color of the machine's focused pane border: its configured machine color, else the
 /// machine's own focus accent.
-pub(super) fn machine_color(
+fn machine_color(
     endpoint: &ClientShellEndpoint,
     config: &ClientShellConfig,
 ) -> ratatui::style::Color {

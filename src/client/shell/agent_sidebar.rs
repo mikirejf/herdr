@@ -93,7 +93,7 @@ pub(super) fn render_agent_panel(
         |row| row.rows.len(),
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config, None);
+            render_agent_row(buffer, rect, row, config, false);
         },
     );
 }
@@ -335,7 +335,7 @@ pub(super) fn agent_row(
     })
 }
 
-/// Follows the first line of an agent on another machine, in that machine's color.
+/// Follows the first line of an agent on another machine, in the secondary text style.
 const REMOTE_MARKER: &str = " [R]";
 
 pub(super) fn render_agent_row(
@@ -343,7 +343,7 @@ pub(super) fn render_agent_row(
     rect: Rect,
     row: &AgentRow,
     config: &ClientShellConfig,
-    machine_marker: Option<ratatui::style::Color>,
+    remote_marker: bool,
 ) {
     let palette = &config.palette;
     let row_style = if row.focused {
@@ -377,8 +377,8 @@ pub(super) fn render_agent_row(
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
-        let marker = machine_marker.filter(|_| index == 0);
-        let marker_columns = if marker.is_some() {
+        let marker = remote_marker && index == 0;
+        let marker_columns = if marker {
             REMOTE_MARKER.chars().count() as u16
         } else {
             0
@@ -395,11 +395,8 @@ pub(super) fn render_agent_row(
                 .saturating_sub(indent as u16)
                 .saturating_sub(marker_columns) as usize,
         ));
-        if let Some(color) = marker {
-            spans.push(ratatui::text::Span::styled(
-                REMOTE_MARKER,
-                Style::default().fg(color),
-            ));
+        if marker {
+            spans.push(ratatui::text::Span::styled(REMOTE_MARKER, secondary));
         }
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
