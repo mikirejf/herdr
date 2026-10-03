@@ -386,3 +386,430 @@ fn machine_that_is_not_connected_keeps_its_row() {
     let first_space = state.hits.workspaces.first().expect("spaces follow").rect;
     assert!(machine.rect.y < first_space.y);
 }
+
+const DEVKIT_ROOT: &str = "/Users/andrej/dev-work/arx1/devkit";
+
+fn right_click(state: &mut ClientShellState, rect: Rect) {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: rect.x + 3,
+        row: rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+}
+
+fn menu_labels(state: &ClientShellState) -> Vec<String> {
+    match &state.overlay {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            menu.items().into_iter().map(|item| item.label).collect()
+        }
+        _ => panic!("a menu is open"),
+    }
+}
+
+fn pick(state: &mut ClientShellState, label: &str) -> ClientShellInput {
+    let index = menu_labels(state)
+        .iter()
+        .position(|item| item == label)
+        .unwrap_or_else(|| panic!("menu offers {label}"));
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+    outcome
+}
+
+fn open_project_menu(state: &mut ClientShellState, key: &str) {
+    state.compose(100, 40).expect("project sidebar");
+    let header = state
+        .hits
+        .projects
+        .iter()
+        .find(|(_, project)| project == key)
+        .expect("project header")
+        .0;
+    right_click(state, header);
+}
+
+fn header_row(state: &mut ClientShellState, key: &str) -> String {
+    let frame = state.compose(100, 40).expect("project sidebar");
+    let header = state
+        .hits
+        .projects
+        .iter()
+        .find(|(_, project)| project == key)
+        .expect("project header")
+        .0;
+    frame_rows(&frame)[header.y as usize].clone()
+}
+
+fn press_enter(state: &mut ClientShellState) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ))])
+}
+
+fn set_rename_input(state: &mut ClientShellState, text: &str) {
+    let Some(ClientShellOverlay::Rename(rename)) = state.overlay.as_mut() else {
+        panic!("rename overlay is open");
+    };
+    rename.input = TextEditor::new(text, false);
+}
+
+/// The one endpoint request in `actions`, with the endpoint it goes to.
+fn endpoint_request(
+    actions: &[ClientShellAction],
+) -> (&ClientEndpointId, &crate::api::schema::Request) {
+    let [ClientShellAction::Endpoint {
+        endpoint_id,
+        request,
+        ..
+    }] = actions
+    else {
+        panic!("expected one endpoint request: {actions:?}");
+    };
+    (endpoint_id, request)
+}
+
+fn temp_preferences(state: &mut ClientShellState, name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("herdr-{name}-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    state.config.preferences_path = Some(path.clone());
+    path
+}
+
+#[test]
+fn project_names_round_trip_through_preferences() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    let path = temp_preferences(&mut state, "project-names");
+    let mut outcome = ClientShellInput::default();
+    state.persist_chrome_preferences(&mut outcome);
+    let saved = std::fs::read_to_string(&path).expect("saved preferences");
+    assert!(!saved.contains("project_names"), "no names, no field");
+
+    state.project_names.insert(DEVKIT.into(), "Devkit".into());
+    state.persist_chrome_preferences(&mut outcome);
+    let loaded = preferences::load(&path).expect("saved preferences");
+    assert_eq!(
+        loaded.project_names,
+        BTreeMap::from([(DEVKIT.to_owned(), "Devkit".to_owned())])
+    );
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.preferences = loaded;
+    assert_eq!(
+        ClientShellState::new(config).project_names,
+        state.project_names
+    );
+    std::fs::remove_file(path).expect("remove preferences");
+}
+
+#[test]
+fn saved_project_name_heads_the_project_before_the_main_label() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    assert!(header_row(&mut state, DEVKIT).contains("ws_1"));
+    state.project_names.insert(DEVKIT.into(), "Devkit".into());
+    let row = header_row(&mut state, DEVKIT);
+    assert!(row.contains("Devkit") && !row.contains("ws_1"));
+    // Other projects keep their derived label.
+    assert!(header_row(&mut state, DOTFILES).contains("ws_2"));
+}
+
+#[test]
+fn rename_project_saves_the_name_and_an_empty_name_clears_it() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    let path = temp_preferences(&mut state, "project-rename");
+    open_project_menu(&mut state, DEVKIT);
+    pick(&mut state, "Rename");
+    let Some(ClientShellOverlay::Rename(rename)) = &state.overlay else {
+        panic!("rename overlay is open");
+    };
+    assert_eq!(rename.title, "rename project");
+    assert_eq!(rename.input.as_str(), "ws_1");
+
+    set_rename_input(&mut state, "  Devkit ");
+    let saved = press_enter(&mut state);
+    assert!(saved.actions.is_empty(), "renaming stays in the client");
+    assert!(saved.repaint);
+    assert_eq!(
+        state.project_names.get(DEVKIT).map(String::as_str),
+        Some("Devkit")
+    );
+    assert_eq!(
+        preferences::load(&path).map(|saved| saved.project_names),
+        Some(BTreeMap::from([(DEVKIT.to_owned(), "Devkit".to_owned())]))
+    );
+    assert!(header_row(&mut state, DEVKIT).contains("Devkit"));
+
+    open_project_menu(&mut state, DEVKIT);
+    pick(&mut state, "Rename");
+    let Some(ClientShellOverlay::Rename(rename)) = &state.overlay else {
+        panic!("rename overlay is open");
+    };
+    assert_eq!(rename.input.as_str(), "Devkit");
+    set_rename_input(&mut state, " ");
+    assert!(press_enter(&mut state).actions.is_empty());
+    assert!(state.project_names.is_empty());
+    assert!(!std::fs::read_to_string(&path)
+        .expect("saved preferences")
+        .contains("project_names"));
+    assert!(header_row(&mut state, DEVKIT).contains("ws_1"));
+    std::fs::remove_file(path).expect("remove preferences");
+}
+
+#[test]
+fn project_menu_offers_a_worktree_on_each_online_machine() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    open_project_menu(&mut state, DEVKIT);
+    assert_eq!(
+        menu_labels(&state),
+        [
+            "Rename",
+            "New worktree on Local",
+            "New worktree on Build",
+            "Collapse"
+        ]
+    );
+
+    pick(&mut state, "Collapse");
+    assert!(state.collapsed_projects.contains(DEVKIT));
+    open_project_menu(&mut state, DEVKIT);
+    assert_eq!(
+        menu_labels(&state).last().map(String::as_str),
+        Some("Expand")
+    );
+
+    state.overlay = None;
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
+    open_project_menu(&mut state, DEVKIT);
+    assert_eq!(
+        menu_labels(&state),
+        ["Rename", "New worktree on Local", "Expand"]
+    );
+}
+
+#[test]
+fn project_whose_key_is_not_a_git_directory_offers_no_worktree() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    let bare = "/srv/git/devkit.git";
+    let mut local = snapshot();
+    local.workspaces = vec![workspace("ws_1", Some((bare, "devkit", true)), true)];
+    state.set_snapshot(Box::new(local));
+    open_project_menu(&mut state, bare);
+    assert_eq!(menu_labels(&state), ["Rename", "Collapse"]);
+}
+
+#[test]
+fn new_worktree_on_the_active_machine_lists_from_the_checkout_root() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    open_project_menu(&mut state, DEVKIT);
+    let outcome = pick(&mut state, "New worktree on Local");
+    let (endpoint_id, request) = endpoint_request(&outcome.actions);
+    assert_eq!(endpoint_id, &ClientEndpointId::Local);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeList(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
+    ));
+}
+
+#[test]
+fn new_worktree_on_another_machine_switches_to_it_and_creates_there() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    open_project_menu(&mut state, DEVKIT);
+    let outcome = pick(&mut state, "New worktree on Build");
+    assert!(matches!(
+        &outcome.actions[..],
+        [ClientShellAction::ActivateEndpoint { endpoint_id, target: None }]
+            if endpoint_id == &remote_id
+    ));
+
+    // The runtime runs the waiting action once the switch commits.
+    assert!(state.activate_endpoint_projection(&remote_id));
+    let actions = state.start_pending_endpoint_intent();
+    let (endpoint_id, request) = endpoint_request(&actions);
+    assert_eq!(endpoint_id, &remote_id);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeList(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
+    ));
+    let list_id = request.id.clone();
+    state.handle_endpoint_result("remote-boot", &list_id, Ok(worktree_list_result(None)));
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::WorktreeCreate(create))
+            if create.source == ClientWorktreeSource::Checkout(DEVKIT_ROOT.into())
+    ));
+
+    let submitted = press_enter(&mut state);
+    let (endpoint_id, request) = endpoint_request(&submitted.actions);
+    assert_eq!(endpoint_id, &remote_id);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeCreate(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
+    ));
+    let create_id = request.id.clone();
+    let failed = state.handle_endpoint_result(
+        "remote-boot",
+        &create_id,
+        Err(ClientShellEndpointError {
+            code: Some("not_git_worktree".into()),
+            message: "no repository here".into(),
+        }),
+    );
+    assert!(failed.1.is_empty());
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::WorktreeCreate(create))
+            if !create.creating && create.error.as_deref() == Some("no repository here")
+    ));
+
+    let retried = press_enter(&mut state);
+    let create_id = endpoint_request(&retried.actions).1.id.clone();
+    let (_, focus) = state.handle_endpoint_result(
+        "remote-boot",
+        &create_id,
+        Ok(super::endpoint_requests::worktree_created_result()),
+    );
+    let (endpoint_id, request) = endpoint_request(&focus);
+    assert_eq!(endpoint_id, &remote_id);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_2"
+    ));
+    assert!(state.overlay.is_none());
+}
+
+#[test]
+fn waiting_action_is_dropped_when_the_switch_ends_elsewhere() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    open_project_menu(&mut state, DEVKIT);
+    pick(&mut state, "New worktree on Build");
+    // The switch rolled back, so Local is still active.
+    assert!(state.start_pending_endpoint_intent().is_empty());
+    assert!(state.pending_endpoint_intent.is_none());
+
+    pick_new_workspace_on(&mut state, "Build");
+    // A later selection replaces the waiting action.
+    state.compose(100, 40).expect("project sidebar");
+    let local_row = state.hits.workspaces[0].rect;
+    click(&mut state, local_row);
+    assert!(state.pending_endpoint_intent.is_none());
+    assert!(state.activate_endpoint_projection(&remote_id));
+    assert!(state.start_pending_endpoint_intent().is_empty());
+}
+
+fn footer_text(state: &mut ClientShellState) -> String {
+    let frame = state.compose(100, 40).expect("sidebar");
+    let footer = state.hits.new_workspace;
+    frame_rows(&frame)[footer.y as usize]
+        .chars()
+        .take(footer.width as usize)
+        .collect()
+}
+
+fn pick_new_workspace_on(state: &mut ClientShellState, machine: &str) -> ClientShellInput {
+    state.compose(100, 40).expect("sidebar");
+    let footer = state.hits.new_workspace;
+    let opened = click(state, footer);
+    assert!(opened.actions.is_empty());
+    pick(state, &format!("New workspace on {machine}"))
+}
+
+#[test]
+fn footer_asks_which_machine_when_several_are_online() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    assert_eq!(footer_text(&mut state), " new ▾");
+    let footer = state.hits.new_workspace;
+    click(&mut state, footer);
+    assert_eq!(
+        menu_labels(&state),
+        ["New workspace on Local", "New workspace on Build"]
+    );
+    state.overlay = None;
+
+    let outcome = pick_new_workspace_on(&mut state, "Build");
+    assert!(matches!(
+        &outcome.actions[..],
+        [ClientShellAction::ActivateEndpoint { endpoint_id, target: None }]
+            if endpoint_id == &remote_id
+    ));
+    assert!(state.activate_endpoint_projection(&remote_id));
+    let actions = state.start_pending_endpoint_intent();
+    let (endpoint_id, request) = endpoint_request(&actions);
+    assert_eq!(endpoint_id, &remote_id);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorkspaceCreate(params)
+            if params.focus && params.source_workspace_id.as_deref() == Some("rws_1")
+    ));
+}
+
+#[test]
+fn footer_pick_prompts_for_the_name_on_the_chosen_machine() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    state.config.prompt_new_workspace_name = true;
+    let outcome = pick_new_workspace_on(&mut state, "Local");
+    assert!(outcome.actions.is_empty());
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            target: ClientRenameTarget::NewWorkspace { source_workspace_id: Some(id), .. },
+            ..
+        })) if id == "ws_1"
+    ));
+
+    state.overlay = None;
+    pick_new_workspace_on(&mut state, "Build");
+    assert!(state.activate_endpoint_projection(&remote_id));
+    assert!(state.start_pending_endpoint_intent().is_empty());
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            target: ClientRenameTarget::NewWorkspace { source_workspace_id: Some(id), .. },
+            ..
+        })) if id == "rws_1"
+    ));
+}
+
+#[test]
+fn footer_creates_at_once_with_one_machine_online() {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
+    assert_eq!(footer_text(&mut state), " new");
+    let footer = state.hits.new_workspace;
+    let outcome = click(&mut state, footer);
+    assert!(state.overlay.is_none());
+    let (endpoint_id, request) = endpoint_request(&outcome.actions);
+    assert_eq!(endpoint_id, &ClientEndpointId::Local);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorkspaceCreate(params) if params.focus
+    ));
+}
+
+#[test]
+fn machine_grouping_keeps_its_footer_and_menus() {
+    let (mut state, _) = project_state(SidebarGroupBy::default());
+    assert_eq!(footer_text(&mut state), " new · Local");
+    let footer = state.hits.new_workspace;
+    let outcome = click(&mut state, footer);
+    assert!(state.overlay.is_none());
+    let (endpoint_id, request) = endpoint_request(&outcome.actions);
+    assert_eq!(endpoint_id, &ClientEndpointId::Local);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorkspaceCreate(_)
+    ));
+
+    state.compose(100, 40).expect("machine sidebar");
+    let row = state.hits.workspaces[0].rect;
+    right_click(&mut state, row);
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Workspace { .. },
+            ..
+        }))
+    ));
+}

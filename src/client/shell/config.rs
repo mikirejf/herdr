@@ -73,6 +73,7 @@ impl ClientShellState {
             collapsed_groups,
             remote_collapsed_groups,
             collapsed_projects,
+            project_names: self.project_names.clone(),
         };
         if let Err(error) = preferences::store(path, preferences) {
             self.set_endpoint_error(error);

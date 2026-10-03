@@ -143,6 +143,38 @@ pub(super) fn project_rows(
     rows
 }
 
+/// The header label: the user's name for the project, else the label `project_rows` derived.
+pub(super) fn header_label<'a>(
+    project_names: &'a BTreeMap<String, String>,
+    key: &str,
+    derived: &'a str,
+) -> &'a str {
+    project_names.get(key).map_or(derived, String::as_str)
+}
+
+/// The main checkout root of a project whose worktree key is its `.git` directory. A key of
+/// another shape, such as a bare repository, has no checkout to start a worktree from.
+pub(super) fn checkout_root(key: &str) -> Option<&str> {
+    // An endpoint path, so either separator can occur whatever the client's OS.
+    key.strip_suffix(".git")?
+        .strip_suffix(['/', '\\'])
+        .filter(|root| !root.is_empty())
+}
+
+/// Whether menus offer `endpoint` as a machine to create a space or worktree on.
+pub(super) fn machine_is_offered(endpoint: &ClientShellEndpoint) -> bool {
+    endpoint.status == ClientEndpointStatus::Online && endpoint.snapshot.is_some()
+}
+
+/// Machines menus offer, in sidebar order: Local first, then the saved machines.
+pub(super) fn offered_machines(endpoints: &[ClientShellEndpoint]) -> Vec<ClientMenuMachine> {
+    endpoints
+        .iter()
+        .filter(|endpoint| machine_is_offered(endpoint))
+        .map(|endpoint| (endpoint.endpoint_id.clone(), endpoint.label.clone()))
+        .collect()
+}
+
 /// Workspaces in project order across machines, as `(endpoint index, workspace index)`.
 pub(super) fn project_workspace_order(
     endpoints: &[ClientShellEndpoint],
@@ -305,7 +337,13 @@ pub(super) fn render_list(
                 collapsed,
                 status,
             } => {
-                render_header(buffer, rect, label, collapsed.then_some(*status), config);
+                render_header(
+                    buffer,
+                    rect,
+                    header_label(state.project_names, key, label),
+                    collapsed.then_some(*status),
+                    config,
+                );
                 put_text(
                     buffer,
                     rect.right().saturating_sub(1),
@@ -597,6 +635,25 @@ mod tests {
         assert!(rows[1..].iter().all(|row| !row.starts_with("machine")));
         // Cached spaces of the disconnected machine stay in their project.
         assert!(rows.contains(&"  jan-box:mutants (last)".to_owned()));
+    }
+
+    #[test]
+    fn checkout_root_is_the_parent_of_a_git_directory_key() {
+        assert_eq!(
+            checkout_root(DEVKIT),
+            Some("/Users/andrej/dev-work/arx1/devkit")
+        );
+        assert_eq!(checkout_root(r"C:\src\herdr\.git"), Some(r"C:\src\herdr"));
+        assert_eq!(checkout_root("/srv/git/devkit.git"), None);
+        assert_eq!(checkout_root("/srv/git/devkit"), None);
+        assert_eq!(checkout_root("/.git"), None);
+    }
+
+    #[test]
+    fn saved_name_wins_over_the_derived_label() {
+        let names = BTreeMap::from([(DEVKIT.to_owned(), "Devkit".to_owned())]);
+        assert_eq!(header_label(&names, DEVKIT, "devkit-main"), "Devkit");
+        assert_eq!(header_label(&names, DOTFILES, "dotfiles"), "dotfiles");
     }
 
     #[test]

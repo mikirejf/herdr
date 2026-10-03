@@ -319,6 +319,10 @@ pub(super) enum ClientRenameTarget {
     Pane {
         pane_id: String,
     },
+    /// A client-side project name in project grouping, keyed by worktree key.
+    Project {
+        key: String,
+    },
 }
 
 #[derive(Debug)]
@@ -426,9 +430,33 @@ pub(super) struct ClientSettingsOverlay {
     pub(super) installing_integrations: bool,
 }
 
+/// Where a new worktree's repository comes from on the endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ClientWorktreeSource {
+    Workspace(String),
+    /// The repository's main checkout root, for a machine that may have no space for it yet.
+    Checkout(String),
+}
+
+impl ClientWorktreeSource {
+    pub(super) fn workspace_id(&self) -> Option<String> {
+        match self {
+            Self::Workspace(workspace_id) => Some(workspace_id.clone()),
+            Self::Checkout(_) => None,
+        }
+    }
+
+    pub(super) fn cwd(&self) -> Option<String> {
+        match self {
+            Self::Workspace(_) => None,
+            Self::Checkout(root) => Some(root.clone()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ClientWorktreeCreateOverlay {
-    pub(super) source_workspace_id: String,
+    pub(super) source: ClientWorktreeSource,
     pub(super) repo_name: String,
     pub(super) branch: TextEditor,
     pub(super) checkout_path: String,
@@ -529,10 +557,34 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    /// Index into the menu target's `machines`.
+    NewWorktreeOn(usize),
+    /// Index into the menu target's `machines`.
+    NewWorkspaceOn(usize),
+}
+
+/// An online machine offered by a menu, as its endpoint ID and label.
+pub(super) type ClientMenuMachine = (ClientEndpointId, String);
+
+/// An action that waits for its endpoint to become active before it runs there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ClientEndpointIntent {
+    NewWorkspace,
+    NewWorktree { checkout_root: String },
 }
 
 #[derive(Debug)]
 pub(super) enum ClientContextMenuTarget {
+    Project {
+        key: String,
+        collapsed: bool,
+        /// `None` when the key is not a `.git` directory, so no checkout root is known.
+        checkout_root: Option<String>,
+        machines: Vec<ClientMenuMachine>,
+    },
+    NewWorkspace {
+        machines: Vec<ClientMenuMachine>,
+    },
     Workspace {
         workspace_id: String,
         is_git: bool,
@@ -562,7 +614,7 @@ pub(super) struct ClientContextMenuOverlay {
 }
 
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+    pub(super) label: String,
     pub(super) action: ClientContextMenuAction,
 }
 
@@ -630,7 +682,7 @@ pub(super) enum PendingEndpointKind {
     IntegrationList,
     IntegrationInstall,
     PrepareWorktreeCreate {
-        workspace_id: String,
+        source: ClientWorktreeSource,
     },
     PrepareWorktreeOpen {
         workspace_id: String,
@@ -875,9 +927,12 @@ pub(crate) struct ClientShellState {
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     /// Collapsed projects in project grouping, keyed by worktree key across all machines.
     pub(super) collapsed_projects: HashSet<String>,
+    /// Names the user gave projects in project grouping, keyed by worktree key.
+    pub(super) project_names: BTreeMap<String, String>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
+    pub(super) pending_endpoint_intent: Option<(ClientEndpointId, ClientEndpointIntent)>,
     pub(super) tab_scroll: usize,
     pub(super) mobile_switcher_scroll: usize,
     pub(super) reveal_focused_workspace: bool,
@@ -1048,9 +1103,11 @@ impl ClientShellState {
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
             collapsed_projects: preferences.collapsed_projects.into_iter().collect(),
+            project_names: preferences.project_names,
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
+            pending_endpoint_intent: None,
             tab_scroll: 0,
             mobile_switcher_scroll: 0,
             reveal_focused_workspace: true,

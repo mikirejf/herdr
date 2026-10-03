@@ -202,7 +202,7 @@ impl ClientShellState {
                 return;
             }
             KeybindAction::NewWorktree => PendingEndpointKind::PrepareWorktreeCreate {
-                workspace_id: workspace_id.clone(),
+                source: ClientWorktreeSource::Workspace(workspace_id.clone()),
             },
             KeybindAction::OpenWorktree => PendingEndpointKind::PrepareWorktreeOpen {
                 workspace_id: workspace_id.clone(),
@@ -261,11 +261,11 @@ impl ClientShellState {
             checkout_path_preview(&worktree_directory, &create.repo_name, &branch);
         create.creating = true;
         create.error = None;
-        let workspace_id = create.source_workspace_id.clone();
+        let source = create.source.clone();
         if !self.push_endpoint_method_with_kind(
             crate::api::schema::Method::WorktreeCreate(crate::api::schema::WorktreeCreateParams {
-                workspace_id: Some(workspace_id),
-                cwd: None,
+                workspace_id: source.workspace_id(),
+                cwd: source.cwd(),
                 branch: Some(branch),
                 base: Some("HEAD".to_owned()),
                 path: None,
@@ -375,7 +375,7 @@ impl ClientShellState {
 
         match (kind, result) {
             (
-                PendingEndpointKind::PrepareWorktreeCreate { workspace_id },
+                PendingEndpointKind::PrepareWorktreeCreate { source: origin },
                 Ok(ResponseResult::WorktreeList { source, .. }),
             ) => {
                 let seed = std::time::SystemTime::now()
@@ -390,7 +390,7 @@ impl ClientShellState {
                     checkout_path_preview(&worktree_directory, &source.repo_name, &branch);
                 self.overlay = Some(ClientShellOverlay::WorktreeCreate(
                     ClientWorktreeCreateOverlay {
-                        source_workspace_id: workspace_id,
+                        source: origin,
                         repo_name: source.repo_name,
                         branch: TextEditor::new(&branch, true),
                         checkout_path,

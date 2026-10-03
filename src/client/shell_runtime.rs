@@ -518,6 +518,26 @@ fn present_committed_activation(
         write_to_server(endpoints, &input).map_err(ClientError::ConnectionLost)?;
     }
     if successor.is_none() {
+        let actions = state
+            .shell
+            .as_mut()
+            .map(shell::ClientShellState::start_pending_endpoint_intent)
+            .unwrap_or_default();
+        if !actions.is_empty() {
+            let mut scheduled_activation = None;
+            dispatch_client_shell_actions(
+                actions,
+                endpoint_commands,
+                endpoints,
+                state.shell.as_mut(),
+                &mut state.detached_process_children,
+                &mut scheduled_activation,
+            )?;
+            debug_assert!(
+                scheduled_activation.is_none(),
+                "an intent runs on the endpoint that just became active"
+            );
+        }
         let active_endpoint = endpoints.active_id().clone();
         let cancelled = endpoint_commands.send_next(&active_endpoint, endpoints);
         if let Some(shell) = state.shell.as_mut() {

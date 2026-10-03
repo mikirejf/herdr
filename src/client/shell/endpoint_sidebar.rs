@@ -268,7 +268,17 @@ pub(super) fn render_expanded(
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
     if config.mouse_capture {
-        let label = format!(" new · {}", active_endpoint_label(state));
+        let label = if config.sidebar_group_by == crate::config::SidebarGroupBy::Project {
+            // Project rows span machines, so the footer names none; a menu picks one instead.
+            let machines = state
+                .endpoints
+                .iter()
+                .filter(|endpoint| super::project_sidebar::machine_is_offered(endpoint))
+                .count();
+            if machines >= 2 { " new ▾" } else { " new" }.to_owned()
+        } else {
+            format!(" new · {}", active_endpoint_label(state))
+        };
         hits.new_workspace = Rect::new(
             workspace_area.x,
             footer_y,

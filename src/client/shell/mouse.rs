@@ -1807,6 +1807,17 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                let project = self
+                    .hits
+                    .projects
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, key)| key.clone());
+                if let Some(key) = project {
+                    self.open_project_context_menu(key, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -2011,6 +2022,12 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.new_workspace, point) {
+                    if self.project_grouping()
+                        && self.open_new_workspace_menu(mouse.column, mouse.row)
+                    {
+                        outcome.repaint = true;
+                        return;
+                    }
                     self.record_binding(
                         crate::input::KeybindMatch::Action(
                             crate::input::KeybindAction::NewWorkspace,

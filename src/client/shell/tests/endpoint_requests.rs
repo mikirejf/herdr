@@ -64,7 +64,7 @@ fn request_id(actions: &[ClientShellAction]) -> &str {
     &request.id
 }
 
-fn worktree_created_result() -> crate::api::schema::ResponseResult {
+pub(super) fn worktree_created_result() -> crate::api::schema::ResponseResult {
     serde_json::from_value(serde_json::json!({
         "type": "worktree_created",
         "workspace": {

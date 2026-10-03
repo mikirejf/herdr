@@ -4,8 +4,42 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let item = |label: &str, action| ClientContextMenuItem {
+            label: label.to_owned(),
+            action,
+        };
         match &self.target {
+            ClientContextMenuTarget::Project {
+                collapsed,
+                checkout_root,
+                machines,
+                ..
+            } => {
+                let mut items = vec![item("Rename", Action::Rename)];
+                if checkout_root.is_some() {
+                    items.extend(machines.iter().enumerate().map(|(index, (_, label))| {
+                        item(
+                            &format!("New worktree on {label}"),
+                            Action::NewWorktreeOn(index),
+                        )
+                    }));
+                }
+                items.push(item(
+                    if *collapsed { "Expand" } else { "Collapse" },
+                    Action::ToggleGroup,
+                ));
+                items
+            }
+            ClientContextMenuTarget::NewWorkspace { machines } => machines
+                .iter()
+                .enumerate()
+                .map(|(index, (_, label))| {
+                    item(
+                        &format!("New workspace on {label}"),
+                        Action::NewWorkspaceOn(index),
+                    )
+                })
+                .collect(),
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -123,6 +157,56 @@ impl ClientShellState {
         }));
     }
 
+    pub(super) fn open_project_context_menu(&mut self, key: String, x: u16, y: u16) {
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Project {
+                collapsed: self.collapsed_projects.contains(&key),
+                checkout_root: super::project_sidebar::checkout_root(&key).map(str::to_owned),
+                machines: super::project_sidebar::offered_machines(&self.endpoints),
+                key,
+            },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
+    /// Project rows span machines, so with several online the footer asks where to create.
+    /// Returns false when only one machine is online, which creates on the active one as before.
+    pub(super) fn open_new_workspace_menu(&mut self, x: u16, y: u16) -> bool {
+        let machines = super::project_sidebar::offered_machines(&self.endpoints);
+        if machines.len() < 2 {
+            return false;
+        }
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::NewWorkspace { machines },
+            x,
+            y,
+            highlighted: 0,
+        }));
+        true
+    }
+
+    /// The project header's current label, as the sidebar shows it.
+    fn project_label(&self, key: &str) -> Option<String> {
+        super::project_sidebar::project_rows(
+            &self.endpoints,
+            &self.active_endpoint_id,
+            &self.collapsed_projects,
+        )
+        .into_iter()
+        .find_map(|row| match row {
+            super::project_sidebar::ProjectRow::Header {
+                key: row_key,
+                label,
+                ..
+            } if row_key == key => Some(
+                super::project_sidebar::header_label(&self.project_names, key, &label).to_owned(),
+            ),
+            _ => None,
+        })
+    }
+
     pub(super) fn open_tab_context_menu(&mut self, tab_id: String, x: u16, y: u16) {
         let Some(tab) = self
             .snapshot
@@ -192,6 +276,50 @@ impl ClientShellState {
             return;
         };
         match menu.target {
+            ClientContextMenuTarget::Project {
+                key,
+                checkout_root,
+                machines,
+                ..
+            } => match action {
+                ClientContextMenuAction::Rename => {
+                    if let Some(label) = self.project_label(&key) {
+                        self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                            title: "rename project",
+                            input: TextEditor::new(&label, false),
+                            target: ClientRenameTarget::Project { key },
+                        }));
+                    }
+                }
+                ClientContextMenuAction::NewWorktreeOn(index) => {
+                    if let (Some(checkout_root), Some((endpoint_id, _))) =
+                        (checkout_root, machines.into_iter().nth(index))
+                    {
+                        self.run_on_endpoint(
+                            endpoint_id,
+                            ClientEndpointIntent::NewWorktree { checkout_root },
+                            outcome,
+                        );
+                    }
+                }
+                ClientContextMenuAction::ToggleGroup => {
+                    let endpoint_id = self.active_endpoint_id.clone();
+                    self.toggle_collapsed_group(&endpoint_id, key);
+                    self.persist_chrome_preferences(outcome);
+                }
+                _ => {}
+            },
+            ClientContextMenuTarget::NewWorkspace { machines } => {
+                if let ClientContextMenuAction::NewWorkspaceOn(index) = action {
+                    if let Some((endpoint_id, _)) = machines.into_iter().nth(index) {
+                        self.run_on_endpoint(
+                            endpoint_id,
+                            ClientEndpointIntent::NewWorkspace,
+                            outcome,
+                        );
+                    }
+                }
+            }
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
             }

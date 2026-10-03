@@ -976,6 +976,16 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::Project { key } => {
+                // An empty name drops the saved one, so the header derives its label again.
+                if trimmed.is_empty() {
+                    self.project_names.remove(&key);
+                } else {
+                    self.project_names.insert(key, trimmed.to_owned());
+                }
+                self.persist_chrome_preferences(outcome);
+                None
+            }
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);

@@ -236,6 +236,79 @@ impl ClientShellState {
         false
     }
 
+    /// Runs `intent` on `endpoint_id`. Requests only reach the active endpoint, so another
+    /// machine is made active first and the intent waits for that switch to commit.
+    pub(super) fn run_on_endpoint(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        intent: ClientEndpointIntent,
+        outcome: &mut ClientShellInput,
+    ) {
+        if endpoint_id == self.active_endpoint_id {
+            self.pending_endpoint_intent = None;
+            self.run_endpoint_intent(intent, outcome);
+        } else if self.activate_endpoint(endpoint_id.clone(), outcome) {
+            self.pending_endpoint_intent = Some((endpoint_id, intent));
+        }
+    }
+
+    /// Picks "New workspace on <machine>" for `endpoint_id`, as the footer menu does.
+    #[cfg(test)]
+    pub(crate) fn create_workspace_on_for_test(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+    ) -> Vec<ClientShellAction> {
+        let mut outcome = ClientShellInput::default();
+        self.run_on_endpoint(
+            endpoint_id,
+            ClientEndpointIntent::NewWorkspace,
+            &mut outcome,
+        );
+        outcome.actions
+    }
+
+    /// Runs the intent that waited for its endpoint, once that endpoint is active. A switch
+    /// that ended elsewhere drops it.
+    pub(crate) fn start_pending_endpoint_intent(&mut self) -> Vec<ClientShellAction> {
+        let Some((endpoint_id, intent)) = self.pending_endpoint_intent.take() else {
+            return Vec::new();
+        };
+        if endpoint_id != self.active_endpoint_id {
+            return Vec::new();
+        }
+        let mut outcome = ClientShellInput::default();
+        self.run_endpoint_intent(intent, &mut outcome);
+        outcome.actions
+    }
+
+    fn run_endpoint_intent(
+        &mut self,
+        intent: ClientEndpointIntent,
+        outcome: &mut ClientShellInput,
+    ) {
+        match intent {
+            ClientEndpointIntent::NewWorkspace => self.record_binding(
+                crate::input::KeybindMatch::Action(crate::input::KeybindAction::NewWorkspace),
+                outcome,
+            ),
+            ClientEndpointIntent::NewWorktree { checkout_root } => {
+                self.push_endpoint_method_with_kind(
+                    crate::api::schema::Method::WorktreeList(
+                        crate::api::schema::WorktreeListParams {
+                            workspace_id: None,
+                            cwd: Some(checkout_root.clone()),
+                            trust_repository: false,
+                        },
+                    ),
+                    PendingEndpointKind::PrepareWorktreeCreate {
+                        source: ClientWorktreeSource::Checkout(checkout_root),
+                    },
+                    outcome,
+                );
+            }
+        }
+    }
+
     pub(super) fn activate_endpoint(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -243,6 +316,7 @@ impl ClientShellState {
     ) -> bool {
         self.pending_workspace_highlight = None;
         self.pending_agent_reveal = None;
+        self.pending_endpoint_intent = None;
         outcome.repaint |= self.previewed_tab.take().is_some();
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
@@ -270,6 +344,7 @@ impl ClientShellState {
     ) -> bool {
         self.pending_workspace_highlight = None;
         self.pending_agent_reveal = None;
+        self.pending_endpoint_intent = None;
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();

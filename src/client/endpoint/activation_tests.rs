@@ -2593,3 +2593,60 @@ fn a_popup_on_the_kept_surface_keeps_the_full_activation() {
         .iter()
         .any(|message| surface_set_active(message) == Some(true)));
 }
+
+#[test]
+fn an_action_picked_for_another_machine_runs_there_once_the_switch_commits() {
+    use crate::client::{
+        endpoint_commands::EndpointCommands, shell_runtime::begin_endpoint_activation, ClientState,
+    };
+
+    let (mut shell, mut endpoints, local_sent, remote_sent) = local_remembering_remote_tab_b();
+    let actions = shell.create_workspace_on_for_test(endpoint());
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [crate::client::shell::ClientShellAction::ActivateEndpoint { endpoint_id, target: None }]
+                if endpoint_id == &endpoint()
+        ),
+        "the machine is made active first: {actions:?}"
+    );
+    let mut state = ClientState::test_new();
+    state.shell = Some(shell);
+    let mut pending = None;
+    begin_endpoint_activation(
+        &mut state,
+        &mut endpoints,
+        &mut EndpointCommands::default(),
+        &mut pending,
+        &mut 9,
+        endpoint(),
+        None,
+        false,
+        Instant::now(),
+        &mut None,
+    )
+    .unwrap();
+
+    assert!(pending.is_none(), "the warm path committed");
+    assert_eq!(endpoints.active_id(), &endpoint());
+    let creates = |sent: &[crate::protocol::ClientMessage]| {
+        sent.iter()
+            .filter(|message| {
+                let crate::protocol::ClientMessage::ClientShellEndpointRequest { request, .. } =
+                    message
+                else {
+                    return false;
+                };
+                serde_json::from_str::<crate::api::schema::Request>(request).is_ok_and(|request| {
+                    matches!(
+                        request.method,
+                        crate::api::schema::Method::WorkspaceCreate(params)
+                            if params.focus && params.source_workspace_id.as_deref() == Some("ws_a")
+                    )
+                })
+            })
+            .count()
+    };
+    assert_eq!(creates(&remote_sent.lock().unwrap()), 1);
+    assert_eq!(creates(&local_sent.lock().unwrap()), 0);
+}
