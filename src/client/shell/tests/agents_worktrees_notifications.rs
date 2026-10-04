@@ -1386,6 +1386,38 @@ fn worktree_remove_escalates_recoverable_failure_to_force_confirmation() {
 }
 
 #[test]
+fn custom_wait_notification_plays_wait_sound_on_client() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.toast_delivery = crate::config::ToastDelivery::Herdr;
+    config.toast_delay_seconds = 0;
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let (effects, _) = state.receive_notification(
+        &ClientEndpointId::Local,
+        SemanticNotification {
+            kind: SemanticNotificationKind::Custom,
+            title: "t".into(),
+            body: None,
+            sound: Some(SemanticNotificationSound::Wait),
+            agent: None,
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            position: None,
+        },
+        std::time::Instant::now(),
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        ClientShellNotificationEffect::Sound {
+            sound: crate::sound::Sound::Wait,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     let mut config = ClientShellConfig::from_config(&Config::default());
     config.toast_delivery = crate::config::ToastDelivery::Herdr;

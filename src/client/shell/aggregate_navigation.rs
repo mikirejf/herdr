@@ -11,6 +11,7 @@ pub(super) struct CachedEndpointSnapshot<'a> {
     pub(super) status: ClientEndpointStatus,
     pub(super) snapshot: &'a ClientShellSnapshot,
     pub(super) agent_recency: &'a HashMap<String, u64>,
+    pub(super) agent_attention: &'a HashMap<String, u64>,
     pub(super) agent_presentation: &'a super::endpoint_agent_state::EndpointAgentPresentation,
 }
 
@@ -37,6 +38,7 @@ pub(super) fn cached_endpoint_snapshots(
                     status: endpoint.status,
                     snapshot,
                     agent_recency: &endpoint.agent_recency,
+                    agent_attention: &endpoint.agent_attention,
                     agent_presentation: &endpoint.agent_presentation,
                 })
         })
@@ -46,11 +48,22 @@ pub(super) struct AggregateAgentRow<'a> {
     pub(super) endpoint: CachedEndpointSnapshot<'a>,
     pub(super) agent: &'a ClientShellAgent,
     pub(super) recency: u64,
+    pub(super) attention: u64,
 }
 
 pub(super) struct AggregateAgentTarget {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) pane_id: String,
+}
+
+pub(super) fn active_agent_attention<'a>(
+    endpoints: &'a [ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+) -> Option<&'a HashMap<String, u64>> {
+    endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == active_endpoint_id)
+        .map(|endpoint| &endpoint.agent_attention)
 }
 
 pub(super) fn aggregate_agent_rows<'a>(
@@ -93,6 +106,11 @@ pub(super) fn aggregate_agent_rows<'a>(
                             .get(&agent.pane_id)
                             .copied()
                             .unwrap_or_default(),
+                        attention: endpoint
+                            .agent_attention
+                            .get(&agent.pane_id)
+                            .copied()
+                            .unwrap_or_default(),
                         endpoint,
                         agent,
                     })
@@ -132,24 +150,33 @@ pub(super) fn aggregate_agent_rows<'a>(
 
     let mut rows = cached_endpoint_snapshots(endpoints)
         .flat_map(|endpoint| {
-            super::agent_sidebar::ordered_agent_pane_ids(endpoint.snapshot, sort)
-                .into_iter()
-                .filter_map(move |pane_id| {
-                    let agent = endpoint
-                        .snapshot
-                        .agents
-                        .iter()
-                        .find(|agent| agent.pane_id == pane_id)?;
-                    Some(AggregateAgentRow {
-                        recency: endpoint
-                            .agent_recency
-                            .get(&pane_id)
-                            .copied()
-                            .unwrap_or_default(),
-                        endpoint,
-                        agent,
-                    })
+            super::agent_sidebar::ordered_agent_pane_ids(
+                endpoint.snapshot,
+                sort,
+                Some(endpoint.agent_attention),
+            )
+            .into_iter()
+            .filter_map(move |pane_id| {
+                let agent = endpoint
+                    .snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane_id)?;
+                Some(AggregateAgentRow {
+                    recency: endpoint
+                        .agent_recency
+                        .get(&pane_id)
+                        .copied()
+                        .unwrap_or_default(),
+                    attention: endpoint
+                        .agent_attention
+                        .get(&pane_id)
+                        .copied()
+                        .unwrap_or_default(),
+                    endpoint,
+                    agent,
                 })
+            })
         })
         .collect::<Vec<_>>();
     sort_aggregate_rows(&mut rows, sort);
@@ -164,6 +191,7 @@ fn sort_aggregate_rows(
         rows.sort_by_key(|row| {
             (
                 row.endpoint.stale(),
+                std::cmp::Reverse(row.attention),
                 std::cmp::Reverse(status_priority(row.agent.agent_status)),
                 std::cmp::Reverse(row.recency),
             )

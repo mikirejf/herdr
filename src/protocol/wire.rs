@@ -1420,6 +1420,7 @@ pub enum SemanticNotificationKind {
 pub enum SemanticNotificationSound {
     Done,
     Request,
+    Wait,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2962,6 +2963,25 @@ mod tests {
             tab_id: Some("w1:t1".into()),
             pane_id: Some("w1:p1".into()),
             position: Some(crate::config::ToastHerdrPosition::TopRight),
+        });
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn semantic_notification_wait_sound_roundtrip() {
+        let msg = ServerMessage::SemanticNotification(SemanticNotification {
+            kind: SemanticNotificationKind::Custom,
+            title: "waiting".into(),
+            body: None,
+            sound: Some(SemanticNotificationSound::Wait),
+            agent: None,
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            position: None,
         });
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

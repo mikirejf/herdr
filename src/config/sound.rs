@@ -19,6 +19,9 @@ pub struct SoundConfig {
     /// Optional mp3 file path for "request" notifications.
     /// Relative paths are resolved from the config file's directory.
     pub request_path: Option<PathBuf>,
+    /// Optional mp3 file path for "wait" notifications.
+    /// Relative paths are resolved from the config file's directory.
+    pub wait_path: Option<PathBuf>,
     pub agents: AgentSoundOverrides,
 }
 
@@ -71,6 +74,7 @@ impl SoundConfig {
         let path = match sound {
             crate::sound::Sound::Done => self.done_path.as_ref().or(self.path.as_ref()),
             crate::sound::Sound::Request => self.request_path.as_ref().or(self.path.as_ref()),
+            crate::sound::Sound::Wait => self.wait_path.as_ref().or(self.path.as_ref()),
         }?;
 
         Some(resolve_config_relative_path(path))
@@ -82,6 +86,7 @@ impl SoundConfig {
             ("ui.sound.path", self.path.as_ref()),
             ("ui.sound.done_path", self.done_path.as_ref()),
             ("ui.sound.request_path", self.request_path.as_ref()),
+            ("ui.sound.wait_path", self.wait_path.as_ref()),
         ] {
             let Some(path) = path else {
                 continue;
@@ -158,6 +163,7 @@ impl Default for SoundConfig {
             path: None,
             done_path: None,
             request_path: None,
+            wait_path: None,
             agents: AgentSoundOverrides::default(),
         }
     }
@@ -207,6 +213,7 @@ enabled = true
 path = "sounds/all.mp3"
 done_path = "sounds/done.mp3"
 request_path = "/tmp/request.mp3"
+wait_path = "/tmp/wait.mp3"
 
 [ui.sound.agents]
 droid = "off"
@@ -222,6 +229,10 @@ claude = "on"
         assert_eq!(
             config.ui.sound.request_path,
             Some(PathBuf::from("/tmp/request.mp3"))
+        );
+        assert_eq!(
+            config.ui.sound.wait_path,
+            Some(PathBuf::from("/tmp/wait.mp3"))
         );
         assert_eq!(config.ui.sound.agents.droid, AgentSoundSetting::Off);
         assert_eq!(config.ui.sound.agents.claude, AgentSoundSetting::On);
@@ -246,6 +257,7 @@ claude = "on"
 [ui.sound]
 path = "sounds/all.mp3"
 done_path = "sounds/done.mp3"
+wait_path = "sounds/wait.mp3"
 "#,
         )
         .unwrap();
@@ -259,6 +271,10 @@ done_path = "sounds/done.mp3"
             config.ui.sound.path_for(crate::sound::Sound::Request),
             Some(config_root.join("sounds/all.mp3"))
         );
+        assert_eq!(
+            config.ui.sound.path_for(crate::sound::Sound::Wait),
+            Some(config_root.join("sounds/wait.mp3"))
+        );
     }
 
     #[test]
@@ -267,6 +283,7 @@ done_path = "sounds/done.mp3"
             r#"
 [ui.sound]
 done_path = "sounds/missing.mp3"
+wait_path = "sounds/missing-wait.mp3"
 "#,
         )
         .unwrap();
@@ -274,6 +291,9 @@ done_path = "sounds/missing.mp3"
         let diagnostics = config.collect_diagnostics();
         assert!(diagnostics.iter().any(
             |diag| diag.contains("ui.sound.done_path") && diag.contains("using default sound")
+        ));
+        assert!(diagnostics.iter().any(
+            |diag| diag.contains("ui.sound.wait_path") && diag.contains("using default sound")
         ));
     }
 

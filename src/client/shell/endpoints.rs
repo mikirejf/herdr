@@ -19,6 +19,9 @@ pub(crate) struct ClientShellEndpoint {
     /// Connection generation that produced `snapshot`. `None` is reserved for local tests.
     pub(crate) snapshot_generation: Option<u64>,
     pub(crate) agent_recency: HashMap<String, u64>,
+    /// Pane id to the counter of its latest sound notification. Drawn from the same global
+    /// counter as `agent_recency`; a pane leaves the map once the user has seen it.
+    pub(crate) agent_attention: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
@@ -76,6 +79,9 @@ impl ClientShellState {
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
                     .unwrap_or_default(),
+                agent_attention: previous
+                    .map(|endpoint| endpoint.agent_attention.clone())
+                    .unwrap_or_default(),
                 agent_presentation: previous
                     .map(|endpoint| endpoint.agent_presentation.clone())
                     .unwrap_or_default(),
@@ -128,6 +134,7 @@ impl ClientShellState {
             endpoint.snapshot_generation = None;
             endpoint.methods = None;
             endpoint.agent_recency.clear();
+            endpoint.agent_attention.clear();
             endpoint.agent_presentation = Default::default();
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
@@ -607,6 +614,7 @@ impl ClientShellState {
             .is_some_and(|previous| previous.boot_id != snapshot.boot_id);
         if boot_changed {
             self.retire_endpoint_notifications(endpoint_id);
+            self.endpoints[index].agent_attention.clear();
         }
         self.endpoints[index]
             .agent_presentation
@@ -620,15 +628,18 @@ impl ClientShellState {
             self.endpoints[index]
                 .agent_presentation
                 .acknowledge_surface(&mut snapshot, surface, self.outer_focused);
+            let endpoint = &mut self.endpoints[index];
+            if endpoint
+                .agent_presentation
+                .presents_surface(&snapshot, surface, self.outer_focused)
+            {
+                for pane in &surface.panes {
+                    endpoint.agent_attention.remove(&pane.pane_id);
+                }
+            }
         }
         let previous = self.endpoints[index].snapshot.as_deref();
-        let mut next_recency = self
-            .endpoints
-            .iter()
-            .flat_map(|endpoint| endpoint.agent_recency.values())
-            .copied()
-            .max()
-            .unwrap_or_default();
+        let mut next_recency = self.max_agent_counter();
         let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
         agents.sort_by_key(|agent| agent.state_change_seq);
         let mut recency = self.endpoints[index].agent_recency.clone();
@@ -654,6 +665,12 @@ impl ClientShellState {
         });
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
+        endpoint.agent_attention.retain(|pane_id, _| {
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| &agent.pane_id == pane_id)
+        });
         endpoint.snapshot_generation = generation;
         endpoint.snapshot = Some(snapshot);
         let pending_matches =
@@ -695,19 +712,58 @@ impl ClientShellState {
         else {
             return false;
         };
-        let changed = {
+        let (changed, cleared_attention) = {
             let endpoint = &mut self.endpoints[index];
             let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
                 return false;
             };
-            endpoint
+            let changed = endpoint.agent_presentation.acknowledge_surface(
+                snapshot,
+                surface,
+                self.outer_focused,
+            );
+            let mut cleared_attention = false;
+            if endpoint
                 .agent_presentation
-                .acknowledge_surface(snapshot, surface, self.outer_focused)
+                .presents_surface(snapshot, surface, self.outer_focused)
+            {
+                for pane in &surface.panes {
+                    cleared_attention |= endpoint.agent_attention.remove(&pane.pane_id).is_some();
+                }
+            }
+            (changed, cleared_attention)
         };
         if changed {
             self.snapshot = self.endpoints[index].snapshot.clone();
         }
-        changed
+        changed || cleared_attention
+    }
+
+    /// Highest counter handed out so far on any machine, so counters compare across machines.
+    fn max_agent_counter(&self) -> u64 {
+        self.endpoints
+            .iter()
+            .flat_map(|endpoint| {
+                endpoint
+                    .agent_recency
+                    .values()
+                    .chain(endpoint.agent_attention.values())
+            })
+            .copied()
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// Lifts a pane to the top of the priority-sorted agent list until the user sees it.
+    pub(super) fn bump_agent_attention(&mut self, endpoint_id: &ClientEndpointId, pane_id: &str) {
+        let counter = self.max_agent_counter().saturating_add(1);
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint.agent_attention.insert(pane_id.to_owned(), counter);
+        }
     }
 
     #[cfg(test)]
@@ -772,6 +828,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         snapshot: None,
         snapshot_generation: None,
         agent_recency: HashMap::new(),
+        agent_attention: HashMap::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,
         pending_agent_view_projection: None,

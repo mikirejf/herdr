@@ -103,6 +103,7 @@ fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
         crate::sound::Sound::Done => "agent done",
         crate::sound::Sound::Request => "agent attention",
+        crate::sound::Sound::Wait => "agent wait",
     }
 }
 

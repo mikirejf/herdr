@@ -689,6 +689,14 @@ fn sound_from_notify_message_maps_attention() {
 }
 
 #[test]
+fn sound_from_notify_message_maps_wait() {
+    assert_eq!(
+        sound_from_notify_message("agent wait"),
+        Some(crate::sound::Sound::Wait)
+    );
+}
+
+#[test]
 fn sound_from_notify_message_rejects_unknown_payloads() {
     assert_eq!(sound_from_notify_message("toast"), None);
 }

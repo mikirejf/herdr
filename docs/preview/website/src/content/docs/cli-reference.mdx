@@ -134,10 +134,10 @@ herdr server reload-agent-manifests
 ## Notifications
 
 ```bash
-herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]
+herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request|wait] [--pane PANE_ID]
 ```
 
-`notification show` uses the configured `[ui.toast]` delivery. `--position` only affects in-app Herdr toasts. `--sound` defaults to `none`; `done` and `request` play the existing finished and needs-attention sounds only when the notification is shown.
+`notification show` uses the configured `[ui.toast]` delivery. `--position` only affects in-app Herdr toasts. `--sound` defaults to `none`; `done` and `request` play the existing finished and needs-attention sounds only when the notification is shown. `wait` plays a separate wait sound and is useful from hooks on a remote server, because the attached client plays it. `--pane` names the pane the notification is about; it defaults to `HERDR_PANE_ID`, which Herdr sets inside every pane. With `ui.agent_panel_sort = "priority"`, a notification with a sound and a pane moves that agent to the top of the Agent panel until you see it. An unknown pane is ignored.
 
 ## Sessions
 

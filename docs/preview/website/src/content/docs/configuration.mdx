@@ -311,6 +311,8 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
+With `ui.agent_panel_sort = "priority"`, the Agent panel lists agents with a fresh sound notification first, then orders the rest by state. A notification that plays a sound moves its agent to the top, and `focus_agent` index 1 jumps to it, until you see that agent. The newest notification wins, also across machines.
+
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
@@ -505,11 +507,12 @@ Sound notifications play through the local Herdr client. Custom sounds must be m
 path = "sounds/notification.mp3"
 done_path = "sounds/done.mp3"
 request_path = "sounds/request.mp3"
+wait_path = "sounds/wait.mp3"
 ```
 
-`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.
+`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds. `wait_path` overrides the `wait` sound, which plays only when `herdr notification show --sound wait` runs. Without `wait_path` or `path`, Herdr plays a built-in wait sound.
 
-Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default.
+Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default. Notifications sent with `herdr notification show --sound` ignore the per-agent setting.
 
 ```toml
 [ui.sound.agents]

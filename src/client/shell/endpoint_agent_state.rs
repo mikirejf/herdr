@@ -115,17 +115,27 @@ impl EndpointAgentPresentation {
         project_aggregate_status(snapshot);
     }
 
+    /// Whether the user is looking at `surface`: the window has focus and the frame matches
+    /// the projected snapshot exactly.
+    pub(super) fn presents_surface(
+        &self,
+        snapshot: &ClientShellSnapshot,
+        surface: &PaneSurfaceFrame,
+        outer_focused: Option<bool>,
+    ) -> bool {
+        outer_focused != Some(false)
+            && self.boot_id.as_deref() == Some(surface.boot_id.as_str())
+            && snapshot.boot_id == surface.boot_id
+            && snapshot.revision == surface.projection_revision
+    }
+
     pub(super) fn acknowledge_surface(
         &mut self,
         snapshot: &mut ClientShellSnapshot,
         surface: &PaneSurfaceFrame,
         outer_focused: Option<bool>,
     ) -> bool {
-        if outer_focused == Some(false)
-            || self.boot_id.as_deref() != Some(surface.boot_id.as_str())
-            || snapshot.boot_id != surface.boot_id
-            || snapshot.revision != surface.projection_revision
-        {
+        if !self.presents_surface(snapshot, surface, outer_focused) {
             return false;
         }
 

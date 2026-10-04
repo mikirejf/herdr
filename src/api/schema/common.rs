@@ -109,6 +109,8 @@ pub struct NotificationShowParams {
     pub position: Option<crate::config::ToastHerdrPosition>,
     #[serde(default, skip_serializing_if = "NotificationShowSound::is_none")]
     pub sound: NotificationShowSound,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
 }
 
 #[derive(
@@ -120,6 +122,7 @@ pub enum NotificationShowSound {
     None,
     Done,
     Request,
+    Wait,
 }
 
 impl NotificationShowSound {

@@ -2362,6 +2362,12 @@
                 "null"
               ]
             },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "position": {
               "anyOf": [
                 {
@@ -2388,7 +2394,8 @@
           "enum": [
             "none",
             "done",
-            "request"
+            "request",
+            "wait"
           ],
           "type": "string"
         },

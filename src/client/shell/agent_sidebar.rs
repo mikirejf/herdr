@@ -17,9 +17,11 @@ pub(super) struct AgentRow {
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
 
+/// `attention` holds the panes a sound notification lifted; they lead the priority order.
 pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
+    attention: Option<&HashMap<String, u64>>,
 ) -> Vec<String> {
     if snapshot.agent_view_label.is_some() {
         return snapshot
@@ -38,6 +40,12 @@ pub(super) fn ordered_agent_pane_ids(
     if sort == crate::config::AgentPanelSortConfig::Priority {
         agents.sort_by_key(|agent| {
             (
+                std::cmp::Reverse(
+                    attention
+                        .and_then(|attention| attention.get(&agent.pane_id))
+                        .copied()
+                        .unwrap_or_default(),
+                ),
                 std::cmp::Reverse(status_priority(agent.agent_status)),
                 std::cmp::Reverse(agent.state_change_seq),
             )
@@ -74,7 +82,9 @@ pub(super) fn render_agent_panel(
         active_endpoint_id,
         config.agent_panel_sort,
     );
-    let rows = agent_rows(snapshot, config, None, &|pane_id| {
+    let attention =
+        super::aggregate_navigation::active_agent_attention(endpoints, active_endpoint_id);
+    let rows = agent_rows(snapshot, config, None, attention, &|pane_id| {
         indexes
             .get(&(active_endpoint_id.clone(), pane_id.to_owned()))
             .copied()
@@ -249,9 +259,10 @@ pub(super) fn agent_rows(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    attention: Option<&HashMap<String, u64>>,
     focus_index: &dyn Fn(&str) -> Option<usize>,
 ) -> Vec<AgentRow> {
-    ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
+    ordered_agent_pane_ids(snapshot, config.agent_panel_sort, attention)
         .into_iter()
         .filter_map(|pane_id| {
             let index = focus_index(&pane_id);

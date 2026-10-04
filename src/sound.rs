@@ -26,6 +26,7 @@ const AUDIO_PLAYER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 static SOUND_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
 static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.mp3");
+static SOUND_WAIT: &[u8] = include_bytes!("../assets/sounds/wait.mp3");
 
 /// Which notification sound to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,8 @@ pub enum Sound {
     Done,
     /// Agent needs input (transitioned to Blocked).
     Request,
+    /// Explicit wait cue, only played through `notification show --sound wait`.
+    Wait,
 }
 
 /// Play a notification sound in a background thread.
@@ -57,6 +60,7 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
         let data = match sound {
             Sound::Done => SOUND_DONE,
             Sound::Request => SOUND_REQUEST,
+            Sound::Wait => SOUND_WAIT,
         };
 
         if let Err(err) = play_bytes(data) {

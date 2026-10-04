@@ -6792,6 +6792,7 @@ fn notification_show_uses_client_shell_policy_independent_of_server_delivery() {
             body: Some("plugin body".into()),
             position: Some(crate::config::ToastHerdrPosition::TopLeft),
             sound: api::schema::NotificationShowSound::Done,
+            pane_id: None,
         },
     );
     let response: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7075,6 +7076,7 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
                 body: Some("api workspace".into()),
                 position: Some(crate::config::ToastHerdrPosition::TopLeft),
                 sound: api::schema::NotificationShowSound::Request,
+                pane_id: None,
             }),
         },
         respond_to,
@@ -7111,6 +7113,149 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
 }
 
 #[test]
+fn notification_show_api_forwards_wait_sound() {
+    let mut server = test_headless_server();
+    let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(client_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+    let (respond_to, _response_rx) = std::sync::mpsc::channel();
+    server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        request: api::schema::Request {
+            id: "notify".into(),
+            method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
+                title: "waiting".into(),
+                body: None,
+                position: None,
+                sound: api::schema::NotificationShowSound::Wait,
+                pane_id: None,
+            }),
+        },
+        respond_to,
+        response_write_complete: None,
+    });
+
+    match read_server_message(
+        client_control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("semantic api notification"),
+    ) {
+        ServerMessage::SemanticNotification(notification) => {
+            assert_eq!(
+                notification.sound,
+                Some(protocol::SemanticNotificationSound::Wait)
+            );
+        }
+        other => panic!("expected semantic api notification, got {other:?}"),
+    }
+}
+
+fn notification_show_for_pane(
+    pane_id: impl FnOnce(&HeadlessServer) -> String,
+) -> (HeadlessServer, protocol::SemanticNotification) {
+    let mut server = test_headless_server();
+    let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    let root_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&root_pane]
+        .attached_terminal_id
+        .clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .detected_agent = Some(crate::detect::Agent::Claude);
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(client_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+    let pane_id = pane_id(&server);
+    server.handle_notification_show_api(
+        "notify".into(),
+        api::schema::NotificationShowParams {
+            title: "waiting".into(),
+            body: None,
+            position: None,
+            sound: api::schema::NotificationShowSound::Wait,
+            pane_id: Some(pane_id),
+        },
+    );
+    match read_server_message(
+        client_control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("semantic api notification"),
+    ) {
+        ServerMessage::SemanticNotification(notification) => (server, notification),
+        other => panic!("expected semantic api notification, got {other:?}"),
+    }
+}
+
+#[test]
+fn notification_show_api_resolves_the_pane_for_the_client() {
+    let (server, notification) = notification_show_for_pane(|server| {
+        let root_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+        server.app.public_pane_id(0, root_pane).unwrap()
+    });
+
+    let root_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    assert_eq!(
+        notification.sound,
+        Some(protocol::SemanticNotificationSound::Wait)
+    );
+    assert_eq!(
+        notification.pane_id,
+        server.app.public_pane_id(0, root_pane)
+    );
+    assert_eq!(
+        notification.workspace_id.as_deref(),
+        Some(server.app.state.workspaces[0].id.as_str())
+    );
+    assert_eq!(notification.tab_id, server.app.public_tab_id(0, 0));
+    assert_eq!(
+        notification.agent.as_deref(),
+        Some(crate::detect::agent_label(crate::detect::Agent::Claude))
+    );
+}
+
+#[test]
+fn notification_show_api_accepts_an_unknown_pane_without_targets() {
+    let (_server, notification) = notification_show_for_pane(|_| "no-such:p99".into());
+
+    assert_eq!(
+        notification.sound,
+        Some(protocol::SemanticNotificationSound::Wait)
+    );
+    assert_eq!(notification.pane_id, None);
+    assert_eq!(notification.workspace_id, None);
+    assert_eq!(notification.tab_id, None);
+    assert_eq!(notification.agent, None);
+}
+
+#[test]
 fn notification_show_api_preserves_colon_in_forwarded_title() {
     let mut server = test_headless_server();
     let (client_tx, client_control_rx, _client_rx) = test_client_writer();
@@ -7137,6 +7282,7 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
                 body: Some("api workspace".into()),
                 position: None,
                 sound: api::schema::NotificationShowSound::None,
+                pane_id: None,
             }),
         },
         respond_to,
@@ -7182,6 +7328,7 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
                 body: None,
                 position: None,
                 sound: api::schema::NotificationShowSound::None,
+                pane_id: None,
             }),
         },
         respond_to,
@@ -7212,6 +7359,7 @@ fn notification_show_api_reports_no_foreground_client() {
                 body: None,
                 position: None,
                 sound: api::schema::NotificationShowSound::Request,
+                pane_id: None,
             }),
         },
         respond_to,
@@ -7261,6 +7409,7 @@ fn notification_show_api_includes_sound_in_semantic_event() {
                         body: None,
                         position: None,
                         sound: api::schema::NotificationShowSound::Done,
+                        pane_id: None,
                     },
                 ),
             },

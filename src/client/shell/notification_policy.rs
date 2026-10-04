@@ -198,12 +198,20 @@ impl ClientShellState {
                 let suppress_sound =
                     pending.event.kind == SemanticNotificationKind::Finished && suppress_external;
                 if !suppress_sound {
+                    if let Some(pane_id) = pending.event.pane_id.as_deref() {
+                        self.bump_agent_attention(&pending.endpoint_id, pane_id);
+                    }
                     effects.push(ClientShellNotificationEffect::Sound {
                         sound: match sound {
                             SemanticNotificationSound::Done => crate::sound::Sound::Done,
                             SemanticNotificationSound::Request => crate::sound::Sound::Request,
+                            SemanticNotificationSound::Wait => crate::sound::Sound::Wait,
                         },
-                        agent: pending.event.agent.clone(),
+                        // An explicit `notification show --sound` is a deliberate request, so the
+                        // per-agent mute must not apply to it.
+                        agent: (pending.event.kind != SemanticNotificationKind::Custom)
+                            .then(|| pending.event.agent.clone())
+                            .flatten(),
                     });
                 }
             }

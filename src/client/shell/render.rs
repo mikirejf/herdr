@@ -298,6 +298,10 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                super::aggregate_navigation::active_agent_attention(
+                    state.endpoints,
+                    state.active_endpoint_id,
+                ),
                 &mut hits,
             );
         } else {

@@ -1152,6 +1152,7 @@ mod tests {
                         body: Some("api workspace".into()),
                         position: Some(crate::config::ToastHerdrPosition::TopLeft),
                         sound: crate::api::schema::NotificationShowSound::None,
+                        pane_id: None,
                     },
                 ),
             });
@@ -1188,6 +1189,7 @@ mod tests {
                         body: None,
                         position: None,
                         sound: crate::api::schema::NotificationShowSound::None,
+                        pane_id: None,
                     },
                 ),
             });
@@ -1224,6 +1226,7 @@ mod tests {
                         body: None,
                         position: None,
                         sound: crate::api::schema::NotificationShowSound::None,
+                        pane_id: None,
                     },
                 ),
             });
@@ -1257,6 +1260,7 @@ mod tests {
                         body: None,
                         position: None,
                         sound: crate::api::schema::NotificationShowSound::None,
+                        pane_id: None,
                     },
                 ),
             });

@@ -1556,6 +1556,308 @@ fn aggregate_priority_uses_client_observed_recency_across_machines() {
     ));
 }
 
+fn agent_on_pane(
+    name: &str,
+    status: crate::api::schema::AgentStatus,
+    state_change_seq: u64,
+    pane_id: &str,
+) -> ClientShellAgent {
+    let mut agent = agent(name, status, state_change_seq);
+    agent.pane_id = pane_id.into();
+    agent
+}
+
+fn sound_notification(pane_id: &str, sound: SemanticNotificationSound) -> SemanticNotification {
+    SemanticNotification {
+        kind: SemanticNotificationKind::Custom,
+        title: "t".into(),
+        body: None,
+        sound: Some(sound),
+        agent: None,
+        workspace_id: None,
+        tab_id: None,
+        pane_id: Some(pane_id.into()),
+        position: None,
+    }
+}
+
+fn priority_state() -> ClientShellState {
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    ClientShellState::new(ClientShellConfig::from_config(&config))
+}
+
+fn priority_order(state: &ClientShellState) -> Vec<String> {
+    aggregate_navigation::aggregate_agent_rows(
+        &state.endpoints,
+        &state.active_endpoint_id,
+        crate::config::AgentPanelSortConfig::Priority,
+    )
+    .into_iter()
+    .map(|row| row.agent.name.clone().expect("agent name"))
+    .collect()
+}
+
+#[test]
+fn notification_sound_lifts_a_working_agent_above_a_blocked_one() {
+    use crate::api::schema::AgentStatus;
+
+    let mut state = priority_state();
+    let mut local = snapshot();
+    local.agents = vec![
+        agent_on_pane("blocked", AgentStatus::Blocked, 1, "pane_a"),
+        agent_on_pane("working", AgentStatus::Working, 1, "pane_b"),
+    ];
+    state.set_snapshot(Box::new(local));
+    assert_eq!(priority_order(&state), ["blocked", "working"]);
+
+    state.receive_notification(
+        &ClientEndpointId::Local,
+        sound_notification("pane_b", SemanticNotificationSound::Wait),
+        std::time::Instant::now(),
+    );
+
+    assert_eq!(priority_order(&state), ["working", "blocked"]);
+}
+
+#[test]
+fn notification_sound_lifts_the_agent_on_a_single_machine_client() {
+    use crate::api::schema::AgentStatus;
+
+    let mut state = priority_state();
+    assert!(!state.multi_endpoint_active());
+    let mut local = snapshot();
+    local.agents = vec![
+        agent_on_pane("blocked", AgentStatus::Blocked, 1, "pane_a"),
+        agent_on_pane("working", AgentStatus::Working, 1, "pane_b"),
+    ];
+    state.set_snapshot(Box::new(local));
+    state.receive_notification(
+        &ClientEndpointId::Local,
+        sound_notification("pane_b", SemanticNotificationSound::Done),
+        std::time::Instant::now(),
+    );
+
+    let snapshot = state.snapshot.as_deref().expect("active snapshot");
+    let order = agent_sidebar::ordered_agent_pane_ids(
+        snapshot,
+        crate::config::AgentPanelSortConfig::Priority,
+        aggregate_navigation::active_agent_attention(&state.endpoints, &state.active_endpoint_id),
+    );
+    assert_eq!(order, ["pane_b", "pane_a"]);
+}
+
+#[test]
+fn newer_notification_sound_wins_across_machines() {
+    use crate::api::schema::AgentStatus;
+
+    let mut state = priority_state();
+    let profile = remote_profile();
+    let remote_id = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
+    let mut local = snapshot();
+    local.agents = vec![agent_on_pane("local", AgentStatus::Idle, 1, "pane_a")];
+    state.set_snapshot(Box::new(local));
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.agents = vec![agent_on_pane("remote", AgentStatus::Idle, 1, "pane_a")];
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+    let now = std::time::Instant::now();
+    let bump = |state: &mut ClientShellState, endpoint_id: &ClientEndpointId| {
+        state.receive_notification(
+            endpoint_id,
+            sound_notification("pane_a", SemanticNotificationSound::Done),
+            now,
+        );
+    };
+
+    bump(&mut state, &ClientEndpointId::Local);
+    assert_eq!(priority_order(&state), ["local", "remote"]);
+    bump(&mut state, &remote_id);
+    assert_eq!(priority_order(&state), ["remote", "local"]);
+    let mut outcome = ClientShellInput::default();
+    assert!(
+        state.handle_endpoint_navigation(crate::input::KeybindAction::FocusAgent(0), &mut outcome)
+    );
+    assert!(matches!(
+        outcome.actions.as_slice(),
+        [ClientShellAction::ActivateEndpoint {
+            endpoint_id: activated,
+            target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
+        }] if activated == &remote_id && pane_id == "pane_a"
+    ));
+    bump(&mut state, &ClientEndpointId::Local);
+    assert_eq!(priority_order(&state), ["local", "remote"]);
+}
+
+#[test]
+fn suppressed_finished_notification_does_not_lift_the_agent() {
+    use crate::api::schema::AgentStatus;
+
+    let finish = |tab_id: &str| {
+        let mut config = ClientShellConfig::from_config(&Config::default());
+        config.toast_delivery = crate::config::ToastDelivery::Off;
+        config.toast_delay_seconds = 0;
+        let mut state = ClientShellState::new(config);
+        let mut projected = snapshot();
+        projected.agents = vec![agent_on_pane("agent", AgentStatus::Working, 1, "pane_1")];
+        state.set_snapshot(Box::new(projected.clone()));
+        let now = std::time::Instant::now();
+        let mut event = sound_notification("pane_1", SemanticNotificationSound::Done);
+        event.kind = SemanticNotificationKind::Finished;
+        event.tab_id = Some(tab_id.into());
+        state.receive_notification(&ClientEndpointId::Local, event, now);
+
+        projected.revision += 1;
+        projected.agents[0].agent_status = AgentStatus::Idle;
+        projected.agents[0].state_change_seq = 2;
+        state.set_snapshot(Box::new(projected));
+        let (effects, _) = state.tick_notifications(
+            now + super::super::notification_policy::COMPLETION_RECHECK_INTERVAL,
+        );
+        let played = effects
+            .iter()
+            .any(|effect| matches!(effect, ClientShellNotificationEffect::Sound { .. }));
+        (played, state.endpoints[0].agent_attention.clone())
+    };
+
+    let (played, attention) = finish("tab_1");
+    assert!(!played);
+    assert!(attention.is_empty());
+
+    let (played, attention) = finish("background-tab");
+    assert!(played);
+    assert!(attention.contains_key("pane_1"));
+}
+
+fn droid_sound_config(enabled: bool) -> crate::config::SoundConfig {
+    toml::from_str(&format!("enabled = {enabled}\n[agents]\ndroid = \"off\"\n"))
+        .expect("sound config")
+}
+
+/// Returns whether the client would play the sound effect of one notification from a droid pane.
+fn droid_notification_is_audible(
+    kind: SemanticNotificationKind,
+    sound: SemanticNotificationSound,
+    sound_config: &crate::config::SoundConfig,
+) -> bool {
+    use crate::api::schema::AgentStatus;
+
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.toast_delivery = crate::config::ToastDelivery::Off;
+    config.toast_delay_seconds = 0;
+    let mut state = ClientShellState::new(config);
+    let mut projected = snapshot();
+    projected.agents = vec![agent_on_pane("agent", AgentStatus::Working, 1, "pane_1")];
+    state.set_snapshot(Box::new(projected.clone()));
+    let now = std::time::Instant::now();
+    let mut event = sound_notification("pane_1", sound);
+    event.kind = kind;
+    event.agent = Some("droid".into());
+    event.tab_id = Some("background-tab".into());
+    let (mut effects, _) = state.receive_notification(&ClientEndpointId::Local, event, now);
+
+    projected.revision += 1;
+    projected.agents[0].agent_status = AgentStatus::Idle;
+    projected.agents[0].state_change_seq = 2;
+    state.set_snapshot(Box::new(projected));
+    effects.extend(
+        state
+            .tick_notifications(
+                now + super::super::notification_policy::COMPLETION_RECHECK_INTERVAL,
+            )
+            .0,
+    );
+    let mut sounds = effects.iter().filter_map(|effect| match effect {
+        ClientShellNotificationEffect::Sound { agent, .. } => Some(agent.as_deref()),
+        _ => None,
+    });
+    let Some(agent) = sounds.next() else {
+        return false;
+    };
+    assert!(sounds.next().is_none());
+    if kind == SemanticNotificationKind::Custom {
+        assert_eq!(agent, None);
+    }
+    crate::client::notifications::sound_effect_allowed(sound_config, agent)
+}
+
+#[test]
+fn custom_notification_sound_ignores_the_per_agent_mute() {
+    assert!(droid_notification_is_audible(
+        SemanticNotificationKind::Custom,
+        SemanticNotificationSound::Wait,
+        &droid_sound_config(true),
+    ));
+}
+
+#[test]
+fn finished_notification_sound_keeps_the_per_agent_mute() {
+    assert!(!droid_notification_is_audible(
+        SemanticNotificationKind::Finished,
+        SemanticNotificationSound::Done,
+        &droid_sound_config(true),
+    ));
+}
+
+#[test]
+fn disabled_sound_config_still_silences_a_custom_notification() {
+    assert!(!droid_notification_is_audible(
+        SemanticNotificationKind::Custom,
+        SemanticNotificationSound::Wait,
+        &droid_sound_config(false),
+    ));
+}
+
+#[test]
+fn seeing_the_agent_clears_its_notification_lift() {
+    use crate::api::schema::AgentStatus;
+
+    let mut state = priority_state();
+    let mut local = snapshot();
+    local.agents = vec![
+        agent_on_pane("blocked", AgentStatus::Blocked, 1, "pane_2"),
+        agent_on_pane("viewed", AgentStatus::Working, 1, "pane_1"),
+    ];
+    state.set_snapshot(Box::new(local));
+    state.receive_notification(
+        &ClientEndpointId::Local,
+        sound_notification("pane_1", SemanticNotificationSound::Request),
+        std::time::Instant::now(),
+    );
+    assert_eq!(priority_order(&state), ["viewed", "blocked"]);
+
+    state.outer_focused = Some(false);
+    assert!(!state.acknowledge_active_surface_agents(&surface()));
+    assert_eq!(priority_order(&state), ["viewed", "blocked"]);
+
+    state.outer_focused = Some(true);
+    assert!(state.acknowledge_active_surface_agents(&surface()));
+    assert_eq!(priority_order(&state), ["blocked", "viewed"]);
+}
+
+#[test]
+fn notification_lift_leaves_with_its_pane() {
+    use crate::api::schema::AgentStatus;
+
+    let mut state = priority_state();
+    let mut local = snapshot();
+    local.agents = vec![agent_on_pane("gone", AgentStatus::Idle, 1, "pane_2")];
+    state.set_snapshot(Box::new(local.clone()));
+    state.receive_notification(
+        &ClientEndpointId::Local,
+        sound_notification("pane_2", SemanticNotificationSound::Done),
+        std::time::Instant::now(),
+    );
+    assert!(state.endpoints[0].agent_attention.contains_key("pane_2"));
+
+    local.revision += 1;
+    local.agents.clear();
+    state.set_snapshot(Box::new(local));
+    assert!(state.endpoints[0].agent_attention.is_empty());
+}
+
 #[test]
 fn unselected_endpoint_completion_projects_done_client_side() {
     use crate::api::schema::AgentStatus;

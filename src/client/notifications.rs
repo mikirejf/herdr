@@ -6,6 +6,13 @@ use crate::protocol::NotifyKind;
 
 use super::shell;
 
+pub(super) fn sound_effect_allowed(
+    sound_config: &crate::config::SoundConfig,
+    agent: Option<&str>,
+) -> bool {
+    sound_config.allows(agent.and_then(crate::detect::parse_agent_label))
+}
+
 pub(super) fn handle_shell_notification_effects(
     effects: Vec<shell::ClientShellNotificationEffect>,
     sound_config: &crate::config::SoundConfig,
@@ -13,8 +20,7 @@ pub(super) fn handle_shell_notification_effects(
     for effect in effects {
         match effect {
             shell::ClientShellNotificationEffect::Sound { sound, agent } => {
-                let agent = agent.as_deref().and_then(crate::detect::parse_agent_label);
-                if sound_config.allows(agent) {
+                if sound_effect_allowed(sound_config, agent.as_deref()) {
                     crate::sound::play(sound, sound_config);
                 }
             }
@@ -97,6 +103,7 @@ pub(super) fn sound_from_notify_message(message: &str) -> Option<crate::sound::S
     match message {
         "agent done" => Some(crate::sound::Sound::Done),
         "agent attention" => Some(crate::sound::Sound::Request),
+        "agent wait" => Some(crate::sound::Sound::Wait),
         _ => None,
     }
 }

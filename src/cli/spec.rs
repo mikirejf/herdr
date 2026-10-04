@@ -310,7 +310,8 @@ fn notification_command() -> Command {
                     "bottom-left",
                     "bottom-right",
                 ]))
-                .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
+                .arg(option("sound", "SOUND").value_parser(["none", "done", "request", "wait"]))
+                .arg(option("pane", "PANE_ID")),
         )
 }
 

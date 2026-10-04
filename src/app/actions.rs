@@ -1857,6 +1857,9 @@ impl AppState {
         let kind = client_notification_kind.unwrap_or(match sound {
             Some(crate::sound::Sound::Request) => ToastKind::NeedsAttention,
             Some(crate::sound::Sound::Done) | None => ToastKind::Finished,
+            Some(crate::sound::Sound::Wait) => {
+                unreachable!("agent state changes never produce the wait sound")
+            }
         });
         let workspace_id = self.workspaces[ws_idx].id.clone();
 

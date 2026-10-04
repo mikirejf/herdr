@@ -1,6 +1,30 @@
 use super::*;
 
+struct NotificationPane {
+    workspace_id: String,
+    tab_id: String,
+    pane_id: String,
+    agent: Option<String>,
+}
+
 impl HeadlessServer {
+    fn notification_pane(&self, raw_pane_id: &str) -> Option<NotificationPane> {
+        let (ws_idx, pane_id) = self.app.parse_pane_id(raw_pane_id)?;
+        let workspace = self.app.state.workspaces.get(ws_idx)?;
+        let tab_idx = workspace.find_tab_index_for_pane(pane_id)?;
+        let terminal = self
+            .app
+            .state
+            .terminals
+            .get(&workspace.pane_state(pane_id)?.attached_terminal_id)?;
+        Some(NotificationPane {
+            workspace_id: self.app.public_workspace_id(ws_idx),
+            tab_id: self.app.public_tab_id(ws_idx, tab_idx)?,
+            pane_id: self.app.public_pane_id(ws_idx, pane_id)?,
+            agent: terminal.effective_agent_label().map(str::to_owned),
+        })
+    }
+
     fn pane_effective_state(&self, pane_id: crate::layout::PaneId) -> crate::detect::AgentState {
         self.app
             .state
@@ -261,17 +285,25 @@ impl HeadlessServer {
             api::schema::NotificationShowSound::Request => {
                 Some(protocol::SemanticNotificationSound::Request)
             }
+            api::schema::NotificationShowSound::Wait => {
+                Some(protocol::SemanticNotificationSound::Wait)
+            }
         };
+        // An unknown pane still shows the notification, just without a target.
+        let pane = params
+            .pane_id
+            .as_deref()
+            .and_then(|pane_id| self.notification_pane(pane_id));
         let shown = self.send_to_client_shells(ServerMessage::SemanticNotification(
             protocol::SemanticNotification {
                 kind: protocol::SemanticNotificationKind::Custom,
                 title,
                 body,
                 sound,
-                agent: None,
-                workspace_id: None,
-                tab_id: None,
-                pane_id: None,
+                agent: pane.as_ref().and_then(|pane| pane.agent.clone()),
+                workspace_id: pane.as_ref().map(|pane| pane.workspace_id.clone()),
+                tab_id: pane.as_ref().map(|pane| pane.tab_id.clone()),
+                pane_id: pane.map(|pane| pane.pane_id),
                 position: params.position,
             },
         ));
