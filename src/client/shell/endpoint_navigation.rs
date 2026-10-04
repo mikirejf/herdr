@@ -118,7 +118,7 @@ impl ClientShellState {
         ) {
             // Like machine grouping, cycling reaches spaces hidden inside collapsed groups.
             let workspaces = if project_grouping {
-                self.project_navigation_targets(&HashSet::new())
+                self.project_navigation_targets()
                     .into_iter()
                     .map(|target| (target.endpoint_id, target.workspace_id))
                     .collect::<Vec<_>>()

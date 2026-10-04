@@ -61,7 +61,7 @@ impl ClientShellState {
             collapsed_endpoints: &self.collapsed_endpoints,
             collapsed_groups: &self.collapsed_groups,
             remote_collapsed_groups: &self.remote_collapsed_groups,
-            collapsed_projects: &self.collapsed_projects,
+            project_order: &self.project_order,
             project_names: &self.project_names,
             workspace_scroll: &mut self.workspace_scroll,
             agent_scroll: &mut self.agent_scroll,
@@ -215,6 +215,9 @@ impl ClientShellState {
                 Some(source_workspace_id.as_str()),
                 target.as_ref().map(|(_, row)| *row),
             ),
+            Some(ClientChromeDrag::Project { target, .. }) => {
+                (None, target.as_ref().map(|(_, row)| *row))
+            }
             _ => (None, None),
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
@@ -244,7 +247,7 @@ impl ClientShellState {
                 collapsed_endpoints: &self.collapsed_endpoints,
                 collapsed_groups: &self.collapsed_groups,
                 remote_collapsed_groups: &self.remote_collapsed_groups,
-                collapsed_projects: &self.collapsed_projects,
+                project_order: &self.project_order,
                 project_names: &self.project_names,
                 workspace_scroll: &mut self.workspace_scroll,
                 agent_scroll: &mut self.agent_scroll,

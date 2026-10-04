@@ -565,6 +565,81 @@ impl ClientShellState {
             .map(|(_, target)| target)
     }
 
+    /// The drop slot nearest `point` between project headers: the key of the project to drop
+    /// before (`None` after the last project) and the row for the indicator line.
+    fn project_drop_target_at(&self, point: (u16, u16)) -> Option<(Option<String>, u16)> {
+        let body = self.hits.workspace_body;
+        let (last_rect, _) = self.hits.projects.last()?;
+        if body.height == 0 || point.1 < body.y.saturating_sub(1) || point.1 >= body.bottom() {
+            return None;
+        }
+        let mut slots = self
+            .hits
+            .projects
+            .iter()
+            .map(|(rect, key)| (Some(key.clone()), rect.y.saturating_sub(1)))
+            .collect::<Vec<_>>();
+        // The last project ends with its last indented member row, if any is shown.
+        let end = self
+            .hits
+            .workspaces
+            .iter()
+            .filter(|hit| hit.indented && hit.rect.y > last_rect.y)
+            .map(|hit| hit.rect.bottom())
+            .max()
+            .unwrap_or_else(|| last_rect.bottom());
+        slots.push((None, end));
+        slots
+            .into_iter()
+            .enumerate()
+            .min_by_key(|(index, (_, row))| (point.1.abs_diff(*row), *index))
+            .map(|(_, target)| target)
+    }
+
+    /// Moves project `source_key` before project `before_key`, or last, and keeps the new order
+    /// of every shown project.
+    fn move_project(&mut self, source_key: &str, before_key: Option<&str>) {
+        let mut order = super::project_sidebar::project_rows(&self.endpoints, &self.project_order)
+            .into_iter()
+            .filter_map(|row| match row {
+                super::project_sidebar::ProjectRow::Header { key, .. } => Some(key),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        order.retain(|key| key != source_key);
+        let position = before_key
+            .and_then(|before| order.iter().position(|key| key == before))
+            .unwrap_or(order.len());
+        order.insert(position, source_key.to_owned());
+        self.project_order = order;
+    }
+
+    /// A click on a project header selects the project's main checkout, else its first space.
+    fn select_project_workspace(&mut self, key: &str, outcome: &mut ClientShellInput) {
+        let Some((endpoint, index)) = super::project_sidebar::project_first_workspace(
+            &self.endpoints,
+            &self.project_order,
+            key,
+        ) else {
+            return;
+        };
+        let endpoint = &self.endpoints[endpoint];
+        let Some(workspace_id) = endpoint
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.workspaces.get(index))
+            .map(|workspace| workspace.workspace_id.clone())
+        else {
+            return;
+        };
+        let endpoint_id = endpoint.endpoint_id.clone();
+        self.focus_or_activate(
+            endpoint_id,
+            ClientEndpointFocusTarget::Workspace(workspace_id),
+            outcome,
+        );
+    }
+
     fn workspace_move_method(
         &self,
         source_workspace_id: &str,
@@ -1187,7 +1262,35 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                Some(ClientChromeDrag::Project { .. }) => {
+                    let target = self.project_drop_target_at(point);
+                    if let Some(ClientChromeDrag::Project {
+                        target: current, ..
+                    }) = self.chrome_drag.as_mut()
+                    {
+                        *current = target;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 None => {}
+            }
+            if let Some(press) = self.project_press.as_ref() {
+                let delta = mouse
+                    .column
+                    .abs_diff(press.start_column)
+                    .max(mouse.row.abs_diff(press.start_row));
+                if delta >= 1 {
+                    let source_key = press.key.clone();
+                    if let Some(target) = self.project_drop_target_at(point) {
+                        self.chrome_drag = Some(ClientChromeDrag::Project {
+                            source_key,
+                            target: Some(target),
+                        });
+                        outcome.repaint = true;
+                    }
+                }
+                return;
             }
             if let Some(press) = self.workspace_press.as_ref() {
                 let delta = mouse
@@ -1230,6 +1333,7 @@ impl ClientShellState {
         if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
             if let Some(drag) = self.chrome_drag.take() {
                 self.workspace_press = None;
+                self.project_press = None;
                 self.tab_press = None;
                 match drag {
                     ClientChromeDrag::Tab {
@@ -1276,6 +1380,13 @@ impl ClientShellState {
                             ) {
                                 self.push_endpoint_method(method, outcome);
                             }
+                        }
+                        outcome.repaint = true;
+                    }
+                    ClientChromeDrag::Project { source_key, target } => {
+                        if let Some((before_key, _)) = target {
+                            self.move_project(&source_key, before_key.as_deref());
+                            self.persist_chrome_preferences(outcome);
                         }
                         outcome.repaint = true;
                     }
@@ -1343,6 +1454,10 @@ impl ClientShellState {
             }
             if let Some(press) = self.workspace_press.take() {
                 self.finish_endpoint_workspace_press(press, outcome);
+                return;
+            }
+            if let Some(press) = self.project_press.take() {
+                self.select_project_workspace(&press.key, outcome);
                 return;
             }
             if let Some(press) = self.tab_press.take() {
@@ -1921,6 +2036,7 @@ impl ClientShellState {
                 self.word_selection_gesture = None;
                 let previous_pane_click = self.last_pane_click.take();
                 self.workspace_press = None;
+                self.project_press = None;
                 self.tab_press = None;
                 self.chrome_drag = None;
                 if super::contains(self.hits.sidebar_divider, point)
@@ -2084,10 +2200,11 @@ impl ClientShellState {
                     .find(|(rect, _)| super::contains(*rect, point))
                     .map(|(_, key)| key.clone());
                 if let Some(key) = project {
-                    let endpoint_id = self.active_endpoint_id.clone();
-                    self.toggle_collapsed_group(&endpoint_id, key);
-                    outcome.repaint = true;
-                    self.persist_chrome_preferences(outcome);
+                    self.project_press = Some(ClientProjectPress {
+                        key,
+                        start_column: mouse.column,
+                        start_row: mouse.row,
+                    });
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

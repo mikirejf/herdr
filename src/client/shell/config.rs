@@ -86,8 +86,6 @@ impl ClientShellState {
             })
             .collect::<Vec<_>>();
         remote_collapsed_groups.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
-        let mut collapsed_projects = self.collapsed_projects.iter().cloned().collect::<Vec<_>>();
-        collapsed_projects.sort();
         let preferences = preferences::ClientChromePreferences {
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
@@ -101,7 +99,7 @@ impl ClientShellState {
                 .then_some(self.config.agent_panel_sort),
             collapsed_groups,
             remote_collapsed_groups,
-            collapsed_projects,
+            project_order: self.project_order.clone(),
             project_names: self.project_names.clone(),
         };
         if let Err(error) = preferences::store(path, preferences) {

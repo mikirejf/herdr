@@ -217,20 +217,6 @@ fn project_mode_draws_one_plain_line_per_space_with_blank_rows_between_projects(
 }
 
 #[test]
-fn only_a_collapsed_header_shows_the_arrow() {
-    let (mut state, _) = project_state(SidebarGroupBy::Project);
-    state.collapsed_projects.insert(DEVKIT.into());
-    let frame = state.compose(100, 40).expect("project sidebar");
-    let rows = sidebar_rows(&frame, &state);
-    let [(devkit, _), (dotfiles, _)] = &state.hits.projects[..] else {
-        panic!("devkit and dotfiles are projects");
-    };
-    assert!(rows[devkit.y as usize].trim_end().ends_with('▸'));
-    assert!(!rows[dotfiles.y as usize].contains('▸'));
-    assert_eq!(rows.iter().filter(|row| row.contains('▸')).count(), 1);
-}
-
-#[test]
 fn machine_grouping_stays_the_default() {
     let (mut state, _) = project_state(SidebarGroupBy::default());
     let frame = state.compose(100, 40).expect("machine sidebar");
@@ -254,35 +240,73 @@ fn machine_grouping_stays_the_default() {
 }
 
 #[test]
-fn project_header_click_collapses_and_persists_the_project() {
+fn project_header_click_selects_the_main_space_and_keeps_every_row() {
+    let (mut state, _) = project_state(SidebarGroupBy::Project);
+    state.compose(100, 40).expect("project sidebar");
+    let dotfiles = state.hits.projects[1].0;
+
+    let outcome = click(&mut state, dotfiles);
+    assert!(matches!(
+        &outcome.actions[..],
+        [ClientShellAction::ActivateEndpoint {
+            endpoint_id: ClientEndpointId::Local,
+            target: Some(ClientEndpointFocusTarget::Workspace(workspace_id)),
+        }] if workspace_id == "ws_2"
+    ));
+    assert!(state.chrome_drag.is_none());
+    state.compose(100, 40).expect("project sidebar");
+    assert_eq!(
+        visible_workspaces(&state),
+        ["ws_1", "rws_1", "ws_2", "ws_3"]
+    );
+}
+
+#[test]
+fn project_header_drag_reorders_projects_and_persists_the_order() {
     let (mut state, _) = project_state(SidebarGroupBy::Project);
     let path = std::env::temp_dir().join(format!(
-        "herdr-project-sidebar-preferences-{}.json",
+        "herdr-project-sidebar-order-{}.json",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
     state.config.preferences_path = Some(path.clone());
-    state.compose(100, 40).expect("expanded project");
-    let header = state.hits.projects[0].0;
+    state.compose(100, 40).expect("project sidebar");
+    let devkit = state.hits.projects[0].0;
+    let dotfiles_space = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_2")
+        .expect("dotfiles space")
+        .rect;
+    let at = |kind, row| {
+        RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column: devkit.x + 3,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    state.handle_raw_events(vec![at(MouseEventKind::Down(MouseButton::Left), devkit.y)]);
+    let drag_row = dotfiles_space.y + 1;
+    state.handle_raw_events(vec![at(MouseEventKind::Drag(MouseButton::Left), drag_row)]);
+    assert!(matches!(
+        state.chrome_drag,
+        Some(ClientChromeDrag::Project { .. })
+    ));
+    let released =
+        state.handle_raw_events(vec![at(MouseEventKind::Up(MouseButton::Left), drag_row)]);
+    assert!(released.actions.is_empty());
 
-    click(&mut state, header);
-    assert!(state.collapsed_projects.contains(DEVKIT));
+    assert_eq!(state.project_order, [DOTFILES, DEVKIT]);
     assert_eq!(
-        preferences::load(&path).map(|saved| saved.collapsed_projects),
-        Some(vec![DEVKIT.to_owned()])
+        preferences::load(&path).map(|saved| saved.project_order),
+        Some(vec![DOTFILES.to_owned(), DEVKIT.to_owned()])
     );
-    let frame = state.compose(100, 40).expect("collapsed project");
-    // The Local space is focused on the active machine, so it stays visible.
-    assert_eq!(visible_workspaces(&state), ["ws_1", "ws_2", "ws_3"]);
-    assert!(frame_rows(&frame)[header.y as usize].contains('▸'));
-    // Machine grouping keeps its own collapse state.
-    assert!(state.collapsed_groups.is_empty());
-
-    click(&mut state, header);
-    state.compose(100, 40).expect("expanded again");
+    state.compose(100, 40).expect("reordered projects");
     assert_eq!(
         visible_workspaces(&state),
-        ["ws_1", "rws_1", "ws_2", "ws_3"]
+        ["ws_2", "ws_1", "rws_1", "ws_3"]
     );
     std::fs::remove_file(path).expect("remove preferences");
 }
@@ -332,14 +356,6 @@ fn navigate_mode_walks_visible_project_rows() {
         .navigate_workspace_id
         .as_ref()
         .is_some_and(|target| target.matches(&remote_id, "rws_1")));
-
-    state.collapsed_projects.insert(DEVKIT.into());
-    state.navigate_workspace_id = state.focused_navigation_target();
-    state.move_navigate_workspace(1);
-    assert!(state
-        .navigate_workspace_id
-        .as_ref()
-        .is_some_and(|target| target.matches(&ClientEndpointId::Local, "ws_2")));
 }
 
 #[test]
@@ -666,29 +682,13 @@ fn project_menu_offers_a_worktree_on_each_online_machine() {
     open_project_menu(&mut state, DEVKIT);
     assert_eq!(
         menu_labels(&state),
-        [
-            "Rename",
-            "New worktree on Local",
-            "New worktree on Build",
-            "Collapse"
-        ]
-    );
-
-    pick(&mut state, "Collapse");
-    assert!(state.collapsed_projects.contains(DEVKIT));
-    open_project_menu(&mut state, DEVKIT);
-    assert_eq!(
-        menu_labels(&state).last().map(String::as_str),
-        Some("Expand")
+        ["Rename", "New worktree on Local", "New worktree on Build"]
     );
 
     state.overlay = None;
     state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
     open_project_menu(&mut state, DEVKIT);
-    assert_eq!(
-        menu_labels(&state),
-        ["Rename", "New worktree on Local", "Expand"]
-    );
+    assert_eq!(menu_labels(&state), ["Rename", "New worktree on Local"]);
 }
 
 #[test]
@@ -699,7 +699,7 @@ fn project_whose_key_is_not_a_git_directory_offers_no_worktree() {
     local.workspaces = vec![workspace("ws_1", Some((bare, "devkit", true)), true)];
     state.set_snapshot(Box::new(local));
     open_project_menu(&mut state, bare);
-    assert_eq!(menu_labels(&state), ["Rename", "Collapse"]);
+    assert_eq!(menu_labels(&state), ["Rename"]);
 }
 
 #[test]

@@ -190,6 +190,12 @@ pub(super) struct ClientTabPress {
     pub(super) start_row: u16,
 }
 
+pub(super) struct ClientProjectPress {
+    pub(super) key: String,
+    pub(super) start_column: u16,
+    pub(super) start_row: u16,
+}
+
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
     SidebarSection,
@@ -218,6 +224,12 @@ pub(super) enum ClientChromeDrag {
     },
     Workspace {
         source_workspace_id: String,
+        target: Option<(Option<String>, u16)>,
+    },
+    /// Moving a project header: the key of the project to drop before (`None` for the end)
+    /// and the row of the drop indicator.
+    Project {
+        source_key: String,
         target: Option<(Option<String>, u16)>,
     },
     PaneSplit {
@@ -579,7 +591,6 @@ pub(super) enum ClientEndpointIntent {
 pub(super) enum ClientContextMenuTarget {
     Project {
         key: String,
-        collapsed: bool,
         /// `None` when the key is not a `.git` directory, so no checkout root is known.
         checkout_root: Option<String>,
         machines: Vec<ClientMenuMachine>,
@@ -592,7 +603,8 @@ pub(super) enum ClientContextMenuTarget {
         is_git: bool,
         is_linked_worktree: bool,
         has_worktree_children: bool,
-        collapsed: bool,
+        /// `None` in project grouping, which has no collapsible groups.
+        collapsed: Option<bool>,
     },
     Tab {
         tab_id: String,
@@ -924,11 +936,12 @@ pub(crate) struct ClientShellState {
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
+    pub(super) project_press: Option<ClientProjectPress>,
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
-    /// Collapsed projects in project grouping, keyed by worktree key across all machines.
-    pub(super) collapsed_projects: HashSet<String>,
+    /// Project order the user set by dragging, as worktree keys across all machines.
+    pub(super) project_order: Vec<String>,
     /// Names the user gave projects in project grouping, keyed by worktree key.
     pub(super) project_names: BTreeMap<String, String>,
     pub(super) workspace_scroll: usize,
@@ -1101,10 +1114,11 @@ impl ClientShellState {
             last_sidebar_divider_click: None,
             chrome_drag: None,
             workspace_press: None,
+            project_press: None,
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
-            collapsed_projects: preferences.collapsed_projects.into_iter().collect(),
+            project_order: preferences.project_order,
             project_names: preferences.project_names,
             workspace_scroll: 0,
             agent_scroll: 0,
@@ -1222,20 +1236,14 @@ impl ClientShellState {
         self.config.sidebar_group_by == crate::config::SidebarGroupBy::Project
     }
 
-    /// Whether the worktree group `key` is collapsed in the active sidebar grouping. Project
-    /// grouping spans machines, so it ignores `endpoint_id`.
+    /// Whether the worktree group `key` is collapsed in the machine grouping.
     pub(super) fn group_is_collapsed(&self, endpoint_id: &ClientEndpointId, key: &str) -> bool {
-        if self.project_grouping() {
-            return self.collapsed_projects.contains(key);
-        }
         self.collapsed_groups_for_endpoint(endpoint_id)
             .is_some_and(|groups| groups.contains(key))
     }
 
     pub(super) fn toggle_collapsed_group(&mut self, endpoint_id: &ClientEndpointId, key: String) {
-        let groups = if self.project_grouping() {
-            &mut self.collapsed_projects
-        } else if endpoint_id.is_local() {
+        let groups = if endpoint_id.is_local() {
             &mut self.collapsed_groups
         } else {
             self.remote_collapsed_groups
@@ -1273,22 +1281,19 @@ impl ClientShellState {
             return;
         }
         let target = if self.project_grouping() && !self.mobile_layout_active() {
-            super::project_sidebar::project_rows(
-                &self.endpoints,
-                &self.active_endpoint_id,
-                &self.collapsed_projects,
-            )
-            .iter()
-            .position(|row| {
-                let super::project_sidebar::ProjectRow::Workspace { endpoint, entry } = row else {
-                    return false;
-                };
-                let endpoint = &self.endpoints[*endpoint];
-                endpoint.endpoint_id == self.active_endpoint_id
-                    && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                        snapshot.workspaces[entry.index].workspace_id == workspace_id
-                    })
-            })
+            super::project_sidebar::project_rows(&self.endpoints, &self.project_order)
+                .iter()
+                .position(|row| {
+                    let super::project_sidebar::ProjectRow::Workspace { endpoint, entry } = row
+                    else {
+                        return false;
+                    };
+                    let endpoint = &self.endpoints[*endpoint];
+                    endpoint.endpoint_id == self.active_endpoint_id
+                        && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                            snapshot.workspaces[entry.index].workspace_id == workspace_id
+                        })
+                })
         } else {
             self.snapshot.as_deref().and_then(|snapshot| {
                 self.navigation_workspace_entries(snapshot)
@@ -1347,6 +1352,7 @@ impl ClientShellState {
         self.popup_terminal_id = None;
         self.chrome_drag = None;
         self.workspace_press = None;
+        self.project_press = None;
         self.tab_press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
@@ -1805,6 +1811,7 @@ impl ClientShellState {
             self.reset_copy_pipeline();
             self.chrome_drag = None;
             self.workspace_press = None;
+            self.project_press = None;
             self.tab_press = None;
             if self.pane_mouse_gesture.as_ref().is_some_and(|gesture| {
                 gesture.hit.popup && previous_popup.as_deref() == Some(gesture.hit.pane_id.as_str())

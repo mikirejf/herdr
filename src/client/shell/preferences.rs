@@ -30,7 +30,7 @@ pub(super) struct ClientChromePreferences {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) remote_collapsed_groups: Vec<ClientRemoteCollapsedGroups>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) collapsed_projects: Vec<String>,
+    pub(super) project_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) project_names: BTreeMap<String, String>,
 }

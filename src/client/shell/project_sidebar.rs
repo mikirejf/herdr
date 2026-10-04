@@ -27,12 +27,7 @@ pub(super) enum ProjectRow {
     /// A machine that is not connected. Its row keeps its status and actions reachable.
     Endpoint(usize),
     /// A repository with at least one space across all machines.
-    Header {
-        key: String,
-        label: String,
-        collapsed: bool,
-        status: crate::api::schema::AgentStatus,
-    },
+    Header { key: String, label: String },
     Workspace {
         endpoint: usize,
         entry: WorkspaceEntry,
@@ -77,11 +72,11 @@ fn row_tokens(
 }
 
 /// Rows in visual order. Equal worktree keys on different machines are one project because
-/// checkouts move between machines at the same absolute path.
+/// checkouts move between machines at the same absolute path. Projects the user ordered come
+/// first, in that order; the others follow in machine and list order.
 pub(super) fn project_rows(
     endpoints: &[ClientShellEndpoint],
-    active_endpoint_id: &ClientEndpointId,
-    collapsed_projects: &HashSet<String>,
+    project_order: &[String],
 ) -> Vec<ProjectRow> {
     let mut rows = endpoints
         .iter()
@@ -127,10 +122,16 @@ pub(super) fn project_rows(
             last_child: false,
         },
     };
+    // Stable, so unordered projects keep their natural order after the ordered ones.
+    projects.sort_by_key(|(worktree, _)| {
+        project_order
+            .iter()
+            .position(|key| *key == worktree.key)
+            .unwrap_or(usize::MAX)
+    });
     for (worktree, mut members) in projects {
         // Stable, so ties keep endpoint order and then each endpoint's list order.
         members.sort_by_key(|member| is_linked(workspace(*member)));
-        let collapsed = collapsed_projects.contains(&worktree.key);
         // Main checkouts sort first, so a main member leads the list when the project has one.
         let main = workspace(members[0]);
         let label = if is_linked(main) {
@@ -141,18 +142,7 @@ pub(super) fn project_rows(
         rows.push(ProjectRow::Header {
             key: worktree.key.clone(),
             label,
-            collapsed,
-            status: members
-                .iter()
-                .map(|member| workspace(*member).agent_status)
-                .max_by_key(|status| status_priority(*status))
-                .unwrap_or(crate::api::schema::AgentStatus::Unknown),
         });
-        if collapsed {
-            members.retain(|member| {
-                &endpoints[member.0].endpoint_id == active_endpoint_id && workspace(*member).focused
-            });
-        }
         let count = members.len();
         rows.extend(
             members
@@ -204,13 +194,29 @@ pub(super) fn offered_machines(endpoints: &[ClientShellEndpoint]) -> Vec<ClientM
         .collect()
 }
 
+/// The space a click on a project header selects: the main checkout, else the first space
+/// listed, as `(endpoint index, workspace index)`.
+pub(super) fn project_first_workspace(
+    endpoints: &[ClientShellEndpoint],
+    project_order: &[String],
+    key: &str,
+) -> Option<(usize, usize)> {
+    project_rows(endpoints, project_order)
+        .into_iter()
+        .skip_while(|row| !matches!(row, ProjectRow::Header { key: row_key, .. } if row_key == key))
+        .skip(1)
+        .find_map(|row| match row {
+            ProjectRow::Workspace { endpoint, entry } => Some((endpoint, entry.index)),
+            _ => None,
+        })
+}
+
 /// Workspaces in project order across machines, as `(endpoint index, workspace index)`.
 pub(super) fn project_workspace_order(
     endpoints: &[ClientShellEndpoint],
-    active_endpoint_id: &ClientEndpointId,
-    collapsed_projects: &HashSet<String>,
+    project_order: &[String],
 ) -> Vec<(usize, usize)> {
-    project_rows(endpoints, active_endpoint_id, collapsed_projects)
+    project_rows(endpoints, project_order)
         .into_iter()
         .filter_map(|row| match row {
             ProjectRow::Workspace { endpoint, entry } => Some((endpoint, entry.index)),
@@ -251,11 +257,7 @@ pub(super) fn render_list(
             .add_modifier(Modifier::BOLD),
     );
     let endpoints = state.endpoints;
-    let rows = project_rows(
-        endpoints,
-        state.active_endpoint_id,
-        state.collapsed_projects,
-    );
+    let rows = project_rows(endpoints, state.project_order);
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -353,29 +355,13 @@ pub(super) fn render_list(
                     endpoint_id: endpoint.endpoint_id.clone(),
                 });
             }
-            ProjectRow::Header {
-                key,
-                label,
-                collapsed,
-                status,
-            } => {
+            ProjectRow::Header { key, label } => {
                 render_header(
                     buffer,
                     rect,
                     header_label(state.project_names, key, label),
-                    collapsed.then_some(*status),
                     config,
                 );
-                if *collapsed {
-                    put_text(
-                        buffer,
-                        rect.right().saturating_sub(1),
-                        rect.y,
-                        u16::from(rect.width > 0),
-                        "▸",
-                        Style::default().fg(palette.accent),
-                    );
-                }
                 hits.projects.push((rect, key.clone()));
             }
             ProjectRow::Workspace {
@@ -405,29 +391,11 @@ pub(super) fn render_list(
     }
 }
 
-/// The repository name, aligned with the names of unindented rows. A collapsed project
-/// shows the most urgent status of its spaces, because their own rows are hidden.
-fn render_header(
-    buffer: &mut Buffer,
-    rect: Rect,
-    label: &str,
-    collapsed_status: Option<crate::api::schema::AgentStatus>,
-    config: &ClientShellConfig,
-) {
+/// The repository name, aligned with the names of unindented rows.
+fn render_header(buffer: &mut Buffer, rect: Rect, label: &str, config: &ClientShellConfig) {
     let palette = &config.palette;
-    let mut x = rect.x.saturating_add(2);
+    let x = rect.x.saturating_add(2);
     let right = rect.right().saturating_sub(2);
-    if let Some(status) = collapsed_status {
-        x = super::render::put_segment(
-            buffer,
-            x,
-            rect.y,
-            right,
-            status_icon(status, config.status_indicators),
-            Style::default().fg(status_color(status, palette)),
-        );
-        x = super::render::put_segment(buffer, x, rect.y, right, " ", Style::default());
-    }
     put_text(
         buffer,
         x,
@@ -584,15 +552,13 @@ mod tests {
     }
 
     /// One line per row: `machine:id` for spaces, indented for project members.
-    fn outline(endpoints: &[ClientShellEndpoint], collapsed: &[&str]) -> Vec<String> {
-        let collapsed = collapsed.iter().map(|key| key.to_string()).collect();
-        project_rows(endpoints, &ClientEndpointId::Local, &collapsed)
+    fn outline(endpoints: &[ClientShellEndpoint], order: &[&str]) -> Vec<String> {
+        let order = order.iter().map(|key| key.to_string()).collect::<Vec<_>>();
+        project_rows(endpoints, &order)
             .into_iter()
             .map(|row| match row {
                 ProjectRow::Endpoint(index) => format!("machine {}", endpoints[index].label),
-                ProjectRow::Header {
-                    label, collapsed, ..
-                } => format!("project {label}{}", if collapsed { " ▸" } else { "" }),
+                ProjectRow::Header { label, .. } => format!("project {label}"),
                 ProjectRow::Workspace { endpoint, entry } => {
                     let workspace = workspace_of(endpoints, endpoint, &entry).unwrap();
                     format!(
@@ -668,39 +634,31 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_project_keeps_the_active_machines_focused_space() {
-        let mut endpoints = fleet();
-        for endpoint in &mut endpoints {
-            // Every machine has a focused space; only the active machine's counts.
-            let snapshot = endpoint.snapshot.as_mut().unwrap();
-            let last = snapshot.workspaces.len() - 1;
-            snapshot.workspaces[last].focused = true;
-            snapshot.workspaces[last].agent_status = crate::api::schema::AgentStatus::Working;
-        }
-        endpoints[0].snapshot.as_mut().unwrap().workspaces[1].agent_status =
-            crate::api::schema::AgentStatus::Blocked;
+    fn saved_order_lists_ordered_projects_first() {
+        let rows = outline(&fleet(), &[DOTFILES, DEVKIT]);
+        assert_eq!(rows[0], "project dotfiles");
+        assert_eq!(rows[2], "project devkit");
+        // A project missing from the order keeps its natural place after the ordered ones.
+        let rows = outline(&fleet(), &[DOTFILES]);
+        assert_eq!(rows[0], "project dotfiles");
+        assert_eq!(rows[2], "project devkit");
+    }
+
+    #[test]
+    fn first_workspace_is_the_main_checkout_else_the_first_listed() {
+        assert_eq!(project_first_workspace(&fleet(), &[], DEVKIT), Some((0, 3)));
+        let endpoints = vec![endpoint(
+            "Local",
+            vec![
+                workspace("test-audit", Some((DEVKIT, "devkit", true))),
+                workspace("other", Some((DEVKIT, "devkit", true))),
+            ],
+        )];
         assert_eq!(
-            outline(&endpoints, &[DEVKIT]),
-            [
-                "project devkit ▸",
-                "  Local:devkit (last)",
-                "project dotfiles",
-                "  Local:dotfiles (last)",
-                "Local:scratch",
-            ]
+            project_first_workspace(&endpoints, &[], DEVKIT),
+            Some((0, 0))
         );
-        let rows = project_rows(
-            &endpoints,
-            &ClientEndpointId::Local,
-            &HashSet::from([DEVKIT.to_owned()]),
-        );
-        assert!(matches!(
-            rows[0],
-            ProjectRow::Header {
-                status: crate::api::schema::AgentStatus::Blocked,
-                ..
-            }
-        ));
+        assert_eq!(project_first_workspace(&endpoints, &[], DOTFILES), None);
     }
 
     #[test]
@@ -736,7 +694,7 @@ mod tests {
     #[test]
     fn workspace_order_lists_spaces_in_row_order() {
         assert_eq!(
-            project_workspace_order(&fleet(), &ClientEndpointId::Local, &HashSet::new()),
+            project_workspace_order(&fleet(), &[]),
             [(0, 3), (1, 1), (0, 1), (1, 0), (0, 2), (0, 0)]
         );
     }

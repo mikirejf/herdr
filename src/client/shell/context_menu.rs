@@ -10,7 +10,6 @@ impl ClientContextMenuOverlay {
         };
         match &self.target {
             ClientContextMenuTarget::Project {
-                collapsed,
                 checkout_root,
                 machines,
                 ..
@@ -24,10 +23,6 @@ impl ClientContextMenuOverlay {
                         )
                     }));
                 }
-                items.push(item(
-                    if *collapsed { "Expand" } else { "Collapse" },
-                    Action::ToggleGroup,
-                ));
                 items
             }
             ClientContextMenuTarget::NewWorkspace { machines } => machines
@@ -65,16 +60,21 @@ impl ClientContextMenuOverlay {
                 has_worktree_children: true,
                 collapsed,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close group", Action::Close),
-                item("New worktree", Action::NewWorktree),
-                item("Open worktree...", Action::OpenWorktree),
-                item(
-                    if *collapsed { "Expand" } else { "Collapse" },
-                    Action::ToggleGroup,
-                ),
-            ],
+            } => {
+                let mut items = vec![
+                    item("Rename", Action::Rename),
+                    item("Close group", Action::Close),
+                    item("New worktree", Action::NewWorktree),
+                    item("Open worktree...", Action::OpenWorktree),
+                ];
+                if let Some(collapsed) = collapsed {
+                    items.push(item(
+                        if *collapsed { "Expand" } else { "Collapse" },
+                        Action::ToggleGroup,
+                    ));
+                }
+                items
+            }
             ClientContextMenuTarget::Tab { .. } => vec![
                 item("New tab", Action::NewTab),
                 item("Rename", Action::Rename),
@@ -140,9 +140,10 @@ impl ClientShellState {
                     .count()
                     >= 2
         });
-        let collapsed = worktree.is_some_and(|worktree| {
-            self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
-        });
+        // Project grouping has no collapsible groups.
+        let collapsed = worktree
+            .filter(|_| !self.project_grouping())
+            .map(|worktree| self.group_is_collapsed(&self.active_endpoint_id, &worktree.key));
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
@@ -160,7 +161,6 @@ impl ClientShellState {
     pub(super) fn open_project_context_menu(&mut self, key: String, x: u16, y: u16) {
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Project {
-                collapsed: self.collapsed_projects.contains(&key),
                 checkout_root: super::project_sidebar::checkout_root(&key).map(str::to_owned),
                 machines: super::project_sidebar::offered_machines(&self.endpoints),
                 key,
@@ -189,22 +189,19 @@ impl ClientShellState {
 
     /// The project header's current label, as the sidebar shows it.
     fn project_label(&self, key: &str) -> Option<String> {
-        super::project_sidebar::project_rows(
-            &self.endpoints,
-            &self.active_endpoint_id,
-            &self.collapsed_projects,
-        )
-        .into_iter()
-        .find_map(|row| match row {
-            super::project_sidebar::ProjectRow::Header {
-                key: row_key,
-                label,
-                ..
-            } if row_key == key => Some(
-                super::project_sidebar::header_label(&self.project_names, key, &label).to_owned(),
-            ),
-            _ => None,
-        })
+        super::project_sidebar::project_rows(&self.endpoints, &self.project_order)
+            .into_iter()
+            .find_map(|row| match row {
+                super::project_sidebar::ProjectRow::Header {
+                    key: row_key,
+                    label,
+                    ..
+                } if row_key == key => Some(
+                    super::project_sidebar::header_label(&self.project_names, key, &label)
+                        .to_owned(),
+                ),
+                _ => None,
+            })
     }
 
     pub(super) fn open_tab_context_menu(&mut self, tab_id: String, x: u16, y: u16) {
@@ -301,11 +298,6 @@ impl ClientShellState {
                             outcome,
                         );
                     }
-                }
-                ClientContextMenuAction::ToggleGroup => {
-                    let endpoint_id = self.active_endpoint_id.clone();
-                    self.toggle_collapsed_group(&endpoint_id, key);
-                    self.persist_chrome_preferences(outcome);
                 }
                 _ => {}
             },
