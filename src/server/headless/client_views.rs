@@ -239,6 +239,7 @@ impl HeadlessServer {
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeCreateCheckout(_)
                 | Method::WorktreeOpen(_)
+                | Method::WorktreeOpenCheckout(_)
                 | Method::WorktreeRemove(_)
         )
     }
@@ -281,6 +282,7 @@ impl HeadlessServer {
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeCreateCheckout(_)
                 | Method::WorktreeOpen(_)
+                | Method::WorktreeOpenCheckout(_)
                 | Method::WorktreeRemove(_)
         )
     }
@@ -310,6 +312,7 @@ impl HeadlessServer {
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeCreateCheckout(_)
                 | Method::WorktreeOpen(_)
+                | Method::WorktreeOpenCheckout(_)
                 | Method::WorktreeRemove(_)
         )
     }

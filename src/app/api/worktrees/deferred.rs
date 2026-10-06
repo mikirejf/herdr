@@ -20,7 +20,8 @@ impl App {
     ) -> bool {
         match request.method {
             crate::api::schema::Method::WorktreeList(_)
-            | crate::api::schema::Method::WorktreeOpen(_) => {
+            | crate::api::schema::Method::WorktreeOpen(_)
+            | crate::api::schema::Method::WorktreeOpenCheckout(_) => {
                 self.start_api_worktree_read(request, respond_to, client_local);
                 true
             }

@@ -41,7 +41,7 @@ fn shell(field: usize) -> ClientShellState {
         8 => {
             state.handle_worktree_endpoint_result(
                 PendingEndpointKind::PrepareWorktreeOpen {
-                    workspace_id: "ws_1".into(),
+                    source: ClientWorktreeSource::Workspace("ws_1".into()),
                 },
                 Ok(worktree_list_result(None)),
                 &mut ClientShellInput::default(),

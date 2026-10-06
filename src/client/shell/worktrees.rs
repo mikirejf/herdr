@@ -205,7 +205,7 @@ impl ClientShellState {
                 source: ClientWorktreeSource::Workspace(workspace_id.clone()),
             },
             KeybindAction::OpenWorktree => PendingEndpointKind::PrepareWorktreeOpen {
-                workspace_id: workspace_id.clone(),
+                source: ClientWorktreeSource::Workspace(workspace_id.clone()),
             },
             KeybindAction::RemoveWorktree if !linked => {
                 self.set_endpoint_error("This workspace is not a Herdr-managed worktree checkout.");
@@ -324,24 +324,32 @@ impl ClientShellState {
         let Some(entry) = open.entries.get(index) else {
             return;
         };
-        let workspace_id = open.source_workspace_id.clone();
+        let source = open.source.clone();
         let path = entry.path.clone();
         open.selected = index;
         open.opening = true;
         open.error = None;
-        if !self.push_endpoint_method_with_kind(
-            crate::api::schema::Method::WorktreeOpen(crate::api::schema::WorktreeOpenParams {
-                workspace_id: Some(workspace_id),
-                cwd: None,
-                path: Some(path),
-                branch: None,
-                label: None,
-                focus: true,
-                trust_repository: false,
-            }),
-            PendingEndpointKind::WorktreeOpen,
-            outcome,
-        ) {
+        let params = crate::api::schema::WorktreeOpenParams {
+            workspace_id: source.workspace_id(),
+            cwd: source.cwd(),
+            path: Some(path),
+            branch: None,
+            label: None,
+            focus: true,
+            trust_repository: false,
+        };
+        // A checkout source only names the repository, so the machine should not gain a
+        // workspace for its main checkout. Servers without that method keep creating one.
+        let checkout_method = crate::api::schema::Method::WorktreeOpenCheckout(params.clone());
+        let method = if matches!(source, ClientWorktreeSource::Checkout(_))
+            && self.supports_endpoint_method(&checkout_method)
+        {
+            checkout_method
+        } else {
+            crate::api::schema::Method::WorktreeOpen(params)
+        };
+        if !self.push_endpoint_method_with_kind(method, PendingEndpointKind::WorktreeOpen, outcome)
+        {
             if let Some(ClientShellOverlay::WorktreeOpen(open)) = self.overlay.as_mut() {
                 open.opening = false;
             }
@@ -412,7 +420,7 @@ impl ClientShellState {
                 true
             }
             (
-                PendingEndpointKind::PrepareWorktreeOpen { workspace_id },
+                PendingEndpointKind::PrepareWorktreeOpen { source },
                 Ok(ResponseResult::WorktreeList { worktrees, .. }),
             ) => {
                 let entries = worktrees
@@ -435,7 +443,7 @@ impl ClientShellState {
                 } else {
                     self.overlay = Some(ClientShellOverlay::WorktreeOpen(
                         ClientWorktreeOpenOverlay {
-                            source_workspace_id: workspace_id,
+                            source,
                             entries,
                             selected: 0,
                             query: TextEditor::default(),

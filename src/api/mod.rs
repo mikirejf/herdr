@@ -38,6 +38,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorktreeCreate(_)
             | Method::WorktreeCreateCheckout(_)
             | Method::WorktreeOpen(_)
+            | Method::WorktreeOpenCheckout(_)
             | Method::WorktreeRemove(_)
             | Method::TabCreate(_)
             | Method::TabFocus(_)

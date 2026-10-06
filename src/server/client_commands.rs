@@ -53,6 +53,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "worktree.create_checkout",
     "worktree.list",
     "worktree.open",
+    "worktree.open_checkout",
     "worktree.remove",
 ];
 
@@ -302,6 +303,10 @@ mod tests {
             actual.remove("worktree.create_checkout").as_deref(),
             Some("4189aa617e52b9a43c6b851528da23de1438a26c32fce287cd9b911c679b4029")
         );
+        assert_eq!(
+            actual.remove("worktree.open_checkout").as_deref(),
+            Some("0bcbb2bc5320021c232a5ae9d083f0f56368e94f67305053081f7870393024cc")
+        );
 
         assert_eq!(
             actual, expected,
@@ -381,6 +386,9 @@ mod tests {
         assert!(supports_client_shell_method(
             &Method::WorktreeCreateCheckout(crate::api::schema::WorktreeCreateParams::default(),)
         ));
+        assert!(supports_client_shell_method(&Method::WorktreeOpenCheckout(
+            crate::api::schema::WorktreeOpenParams::default(),
+        )));
         assert!(!supports_client_shell_method(&Method::Ping(
             crate::api::schema::PingParams::default(),
         )));

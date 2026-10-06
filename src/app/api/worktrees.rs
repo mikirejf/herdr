@@ -70,6 +70,7 @@ impl App {
         &mut self,
         id: String,
         params: WorktreeOpenParams,
+        open_parent_workspace: bool,
         mut source: WorktreeSource,
         entry: crate::worktree::ExistingWorktree,
     ) -> String {
@@ -93,10 +94,17 @@ impl App {
         let target_is_source = canonical_path == canonical_source;
         let already_open = self.open_workspace_idx_for_checkout(&canonical_path);
         let defer_source_created_event = target_is_source && already_open.is_none();
+        // A linked worktree's membership comes from `source`, not from a parent workspace,
+        // so a missing parent can stay missing. The main checkout itself needs its workspace.
         let created_source_workspace =
-            match self.ensure_source_parent_membership(&mut source, !defer_source_created_event) {
-                Ok(created) => created,
-                Err(err) => return encode_error(id, err.code, err.message),
+            if open_parent_workspace || target_is_source || source.workspace_idx.is_some() {
+                match self.ensure_source_parent_membership(&mut source, !defer_source_created_event)
+                {
+                    Ok(created) => created,
+                    Err(err) => return encode_error(id, err.code, err.message),
+                }
+            } else {
+                false
             };
         let (ws_idx, created_workspace) = if let Some(ws_idx) = already_open {
             if params.focus {
@@ -1198,6 +1206,84 @@ mod tests {
         remove_created_worktree(&mut app, &repo, &worktree.path);
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    async fn open_existing_worktree_from_cwd(
+        method: fn(WorktreeOpenParams) -> crate::api::schema::Method,
+        name: &str,
+    ) -> App {
+        let repo = create_committed_repo(&format!("{name}-repo"));
+        let checkout = unique_temp_path(&format!("{name}-checkout"));
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "worktree/open-from-cwd",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let mut app = test_app();
+        app.state.default_shell = test_shell().into();
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: method(WorktreeOpenParams {
+                    cwd: Some(repo.display().to_string()),
+                    path: Some(checkout.display().to_string()),
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeOpened { worktree, .. } = success.result else {
+            panic!("expected worktree_opened response");
+        };
+        assert!(worktree.is_linked_worktree);
+
+        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
+        crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
+        app
+    }
+
+    #[tokio::test]
+    async fn api_worktree_open_checkout_without_parent_skips_parent_workspace() {
+        let app = open_existing_worktree_from_cwd(
+            crate::api::schema::Method::WorktreeOpenCheckout,
+            "api-worktree-open-no-parent",
+        )
+        .await;
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(
+            app.state.workspaces[0]
+                .worktree_space()
+                .expect("worktree workspace should carry membership")
+                .is_linked_worktree
+        );
+    }
+
+    #[tokio::test]
+    async fn api_worktree_open_from_cwd_without_parent_still_creates_parent_workspace() {
+        let app = open_existing_worktree_from_cwd(
+            crate::api::schema::Method::WorktreeOpen,
+            "api-worktree-open-parent-default",
+        )
+        .await;
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert!(
+            !app.state.workspaces[0]
+                .worktree_space()
+                .unwrap()
+                .is_linked_worktree
+        );
     }
 
     #[tokio::test]

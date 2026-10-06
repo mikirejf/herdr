@@ -117,11 +117,13 @@ impl HeadlessServer {
                     | api::schema::Method::WorktreeRemove(_)
                     | api::schema::Method::WorktreeList(_)
                     | api::schema::Method::WorktreeOpen(_)
+                    | api::schema::Method::WorktreeOpenCheckout(_)
             );
             let deferred_navigation = match &request.method {
                 api::schema::Method::WorktreeCreate(params)
                 | api::schema::Method::WorktreeCreateCheckout(params) => params.focus,
-                api::schema::Method::WorktreeOpen(params) => params.focus,
+                api::schema::Method::WorktreeOpen(params)
+                | api::schema::Method::WorktreeOpenCheckout(params) => params.focus,
                 _ => false,
             };
             client.shell_deferred_navigation_request_id =

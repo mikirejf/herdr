@@ -62,7 +62,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
 
     state.overlay = Some(ClientShellOverlay::WorktreeOpen(
         ClientWorktreeOpenOverlay {
-            source_workspace_id: "ws_1".into(),
+            source: ClientWorktreeSource::Workspace("ws_1".into()),
             entries: Vec::new(),
             selected: 0,
             query: TextEditor::default(),

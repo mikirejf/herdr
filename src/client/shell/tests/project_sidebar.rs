@@ -682,13 +682,26 @@ fn project_menu_offers_a_worktree_on_each_online_machine() {
     open_project_menu(&mut state, DEVKIT);
     assert_eq!(
         menu_labels(&state),
-        ["Rename", "New worktree on Local", "New worktree on Build"]
+        [
+            "Rename",
+            "New worktree on Local",
+            "New worktree on Build",
+            "Open worktree on Local...",
+            "Open worktree on Build...",
+        ]
     );
 
     state.overlay = None;
     state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
     open_project_menu(&mut state, DEVKIT);
-    assert_eq!(menu_labels(&state), ["Rename", "New worktree on Local"]);
+    assert_eq!(
+        menu_labels(&state),
+        [
+            "Rename",
+            "New worktree on Local",
+            "Open worktree on Local..."
+        ]
+    );
 }
 
 #[test]
@@ -829,6 +842,74 @@ fn new_worktree_on_an_older_machine_falls_back_to_plain_create() {
         method,
         crate::api::schema::Method::WorktreeCreate(params)
             if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
+    ));
+}
+
+fn submitted_open_worktree_method(advertised: &[&str]) -> crate::api::schema::Method {
+    let (mut state, remote_id) = project_state(SidebarGroupBy::Project);
+    open_project_menu(&mut state, DEVKIT);
+    let outcome = pick(&mut state, "Open worktree on Build...");
+    assert!(matches!(
+        &outcome.actions[..],
+        [ClientShellAction::ActivateEndpoint { endpoint_id, target: None }]
+            if endpoint_id == &remote_id
+    ));
+    assert!(state.activate_endpoint_projection(&remote_id));
+    let actions = state.start_pending_endpoint_intent();
+    let (endpoint_id, request) = endpoint_request(&actions);
+    assert_eq!(endpoint_id, &remote_id);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeList(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT) && params.workspace_id.is_none()
+    ));
+    let list_id = request.id.clone();
+    state.handle_endpoint_result("remote-boot", &list_id, Ok(worktree_list_result(None)));
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::WorktreeOpen(open))
+            if open.source == ClientWorktreeSource::Checkout(DEVKIT_ROOT.into())
+    ));
+    state.set_endpoint_methods_for(
+        &remote_id,
+        Some(
+            advertised
+                .iter()
+                .map(|method| (*method).to_owned())
+                .collect(),
+        ),
+    );
+    let submitted = press_enter(&mut state);
+    let (endpoint_id, request) = endpoint_request(&submitted.actions);
+    assert_eq!(endpoint_id, &remote_id);
+    request.method.clone()
+}
+
+#[test]
+fn open_worktree_on_a_machine_asks_not_to_open_the_main_checkout_when_supported() {
+    let method = submitted_open_worktree_method(&[
+        "worktree.list",
+        "worktree.open",
+        "worktree.open_checkout",
+    ]);
+    assert!(matches!(
+        method,
+        crate::api::schema::Method::WorktreeOpenCheckout(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT)
+                && params.workspace_id.is_none()
+                && params.path.as_deref() == Some("/repo-feature")
+    ));
+}
+
+#[test]
+fn open_worktree_on_an_older_machine_falls_back_to_plain_open() {
+    let method = submitted_open_worktree_method(&["worktree.list", "worktree.open"]);
+    assert!(matches!(
+        method,
+        crate::api::schema::Method::WorktreeOpen(params)
+            if params.cwd.as_deref() == Some(DEVKIT_ROOT)
+                && params.workspace_id.is_none()
+                && params.path.as_deref() == Some("/repo-feature")
     ));
 }
 

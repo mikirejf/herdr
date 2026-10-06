@@ -42,6 +42,7 @@ impl App {
                 let changes_workspace = matches!(
                     &result.request.method,
                     crate::api::schema::Method::WorktreeOpen(_)
+                        | crate::api::schema::Method::WorktreeOpenCheckout(_)
                 );
                 self.handle_api_worktree_read_finished(*result);
                 changes_workspace
@@ -1048,7 +1049,7 @@ impl App {
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target);
             }
-            Method::WorktreeList(_) | Method::WorktreeOpen(_) => {
+            Method::WorktreeList(_) | Method::WorktreeOpen(_) | Method::WorktreeOpenCheckout(_) => {
                 return responses::encode_error(
                     request.id,
                     "invalid_request",

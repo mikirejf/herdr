@@ -101,6 +101,8 @@ pub enum Method {
     WorktreeCreateCheckout(WorktreeCreateParams),
     #[serde(rename = "worktree.open")]
     WorktreeOpen(WorktreeOpenParams),
+    #[serde(rename = "worktree.open_checkout")]
+    WorktreeOpenCheckout(WorktreeOpenParams),
     #[serde(rename = "worktree.remove")]
     WorktreeRemove(WorktreeRemoveParams),
     #[serde(rename = "tab.create")]

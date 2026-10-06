@@ -306,6 +306,21 @@ impl ClientShellState {
                     outcome,
                 );
             }
+            ClientEndpointIntent::OpenWorktree { checkout_root } => {
+                self.push_endpoint_method_with_kind(
+                    crate::api::schema::Method::WorktreeList(
+                        crate::api::schema::WorktreeListParams {
+                            workspace_id: None,
+                            cwd: Some(checkout_root.clone()),
+                            trust_repository: false,
+                        },
+                    ),
+                    PendingEndpointKind::PrepareWorktreeOpen {
+                        source: ClientWorktreeSource::Checkout(checkout_root),
+                    },
+                    outcome,
+                );
+            }
         }
     }
 

@@ -518,7 +518,7 @@ impl ClientWorktreeOpenEntry {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeOpenOverlay {
-    pub(super) source_workspace_id: String,
+    pub(super) source: ClientWorktreeSource,
     pub(super) entries: Vec<ClientWorktreeOpenEntry>,
     pub(super) selected: usize,
     pub(super) query: TextEditor,
@@ -574,6 +574,8 @@ pub(super) enum ClientContextMenuAction {
     /// Index into the menu target's `machines`.
     NewWorktreeOn(usize),
     /// Index into the menu target's `machines`.
+    OpenWorktreeOn(usize),
+    /// Index into the menu target's `machines`.
     NewWorkspaceOn(usize),
 }
 
@@ -585,6 +587,7 @@ pub(super) type ClientMenuMachine = (ClientEndpointId, String);
 pub(super) enum ClientEndpointIntent {
     NewWorkspace,
     NewWorktree { checkout_root: String },
+    OpenWorktree { checkout_root: String },
 }
 
 #[derive(Debug)]
@@ -699,7 +702,7 @@ pub(super) enum PendingEndpointKind {
         source: ClientWorktreeSource,
     },
     PrepareWorktreeOpen {
-        workspace_id: String,
+        source: ClientWorktreeSource,
     },
     PrepareWorktreeRemove {
         workspace_id: String,

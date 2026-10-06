@@ -283,7 +283,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             creating: false,
         }),
         ClientShellOverlay::WorktreeOpen(ClientWorktreeOpenOverlay {
-            source_workspace_id: "ws_1".into(),
+            source: ClientWorktreeSource::Workspace("ws_1".into()),
             entries: Vec::new(),
             selected: 0,
             query: TextEditor::default(),

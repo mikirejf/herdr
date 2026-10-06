@@ -22,6 +22,12 @@ impl ClientContextMenuOverlay {
                             Action::NewWorktreeOn(index),
                         )
                     }));
+                    items.extend(machines.iter().enumerate().map(|(index, (_, label))| {
+                        item(
+                            &format!("Open worktree on {label}..."),
+                            Action::OpenWorktreeOn(index),
+                        )
+                    }));
                 }
                 items
             }
@@ -295,6 +301,17 @@ impl ClientShellState {
                         self.run_on_endpoint(
                             endpoint_id,
                             ClientEndpointIntent::NewWorktree { checkout_root },
+                            outcome,
+                        );
+                    }
+                }
+                ClientContextMenuAction::OpenWorktreeOn(index) => {
+                    if let (Some(checkout_root), Some((endpoint_id, _))) =
+                        (checkout_root, machines.into_iter().nth(index))
+                    {
+                        self.run_on_endpoint(
+                            endpoint_id,
+                            ClientEndpointIntent::OpenWorktree { checkout_root },
                             outcome,
                         );
                     }

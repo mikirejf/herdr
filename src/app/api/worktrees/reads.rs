@@ -146,7 +146,7 @@ impl App {
                 true,
                 params.trust_repository,
             ),
-            Method::WorktreeOpen(params) => {
+            Method::WorktreeOpen(params) | Method::WorktreeOpenCheckout(params) => {
                 if params.path.is_some() == params.branch.is_some() {
                     let _ = respond_to.send(encode_error(
                         request.id,
@@ -196,7 +196,9 @@ impl App {
                             trust_repository,
                         )
                         .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
-                        if let Method::WorktreeOpen(params) = &request.method {
+                        if let Method::WorktreeOpen(params) | Method::WorktreeOpenCheckout(params) =
+                            &request.method
+                        {
                             entries = vec![find_worktree_entry(
                                 entries,
                                 params.path.clone(),
@@ -282,6 +284,17 @@ impl App {
                     Method::WorktreeOpen(params) => self.finish_worktree_open(
                         result.request.id,
                         params,
+                        true,
+                        source,
+                        data.entries
+                            .into_iter()
+                            .next()
+                            .expect("open discovery selects one worktree"),
+                    ),
+                    Method::WorktreeOpenCheckout(params) => self.finish_worktree_open(
+                        result.request.id,
+                        params,
+                        false,
                         source,
                         data.entries
                             .into_iter()
