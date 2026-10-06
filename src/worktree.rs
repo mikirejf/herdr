@@ -211,7 +211,6 @@ pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
     )
 }
 
-#[cfg(any(windows, test))]
 pub(crate) fn checkout_has_dirty_files(
     path: &Path,
     trust_repository: bool,
@@ -341,6 +340,112 @@ pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), Stri
     } else {
         message
     })
+}
+
+/// Removes a checkout without waiting for its files to be deleted.
+///
+/// Deleting a large checkout (build output, dependencies) takes seconds, so the
+/// checkout is renamed aside and unregistered instead. The returned directory still
+/// holds the files; the caller deletes it with `delete_removed_checkout`.
+/// Anything the fast path declines goes through the plain `git worktree remove`, which
+/// also produces the dirty, locked, and submodule errors.
+pub(crate) fn run_worktree_remove_deferring_delete(
+    command: &WorktreeCommand,
+    repo_root: &Path,
+    path: &Path,
+    force: bool,
+    trust_repository: bool,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(removed) =
+        move_checkout_aside_and_unregister(repo_root, path, force, trust_repository)
+    {
+        return Ok(Some(removed));
+    }
+    run_worktree_remove_command_with_recovery(command, repo_root, path, force, trust_repository)
+        .map(|()| None)
+}
+
+pub(crate) fn delete_removed_checkout(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            tracing::warn!(path = %path.display(), err = %err, "failed to delete removed worktree checkout");
+        }
+    }
+}
+
+fn move_checkout_aside_and_unregister(
+    repo_root: &Path,
+    path: &Path,
+    force: bool,
+    trust_repository: bool,
+) -> Option<PathBuf> {
+    // Git refuses to remove a dirty checkout without force; `worktree move` does not
+    // check, so the plain remove has to report that case.
+    if !force && !matches!(checkout_has_dirty_files(path, trust_repository), Ok(false)) {
+        return None;
+    }
+    let aside = removed_checkout_path(path)?;
+    let mut args = repository_git_args(repo_root, trust_repository);
+    args.extend([
+        "worktree".to_string(),
+        "move".to_string(),
+        path.display().to_string(),
+        aside.display().to_string(),
+    ]);
+    // Locked checkouts and checkouts with submodules are refused here and fall back to
+    // the plain remove.
+    run_worktree_command(&WorktreeCommand {
+        program: "git".to_string(),
+        args,
+    })
+    .ok()?;
+
+    if unregister_moved_checkout(repo_root, &aside, trust_repository).is_err() {
+        // The checkout is already moved, so only a registered remove can finish the job.
+        let remove = build_worktree_remove_command(repo_root, &aside, true, trust_repository);
+        if let Err(err) = run_worktree_command(&remove) {
+            tracing::warn!(path = %aside.display(), err = %err, "failed to remove moved worktree checkout");
+        }
+    }
+    Some(aside)
+}
+
+fn removed_checkout_path(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_string_lossy();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Some(parent.join(format!(".{name}.removing-{}-{nanos}", std::process::id())))
+}
+
+/// Deletes the repository's admin directory for a checkout, which is all that
+/// `git worktree remove` does besides deleting the files.
+fn unregister_moved_checkout(
+    repo_root: &Path,
+    checkout: &Path,
+    trust_repository: bool,
+) -> Result<(), String> {
+    let content = std::fs::read_to_string(checkout.join(".git")).map_err(|err| err.to_string())?;
+    let gitdir = content
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(|gitdir| PathBuf::from(gitdir.trim()))
+        .ok_or("checkout has no gitdir link")?;
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        checkout.join(gitdir)
+    };
+    let worktrees_dir = git_common_worktrees_dir(repo_root, trust_repository)
+        .ok_or("could not find the repository worktrees directory")?;
+    if !canonical_or_original(&gitdir).starts_with(canonical_or_original(&worktrees_dir)) {
+        return Err("checkout gitdir is outside the repository".to_string());
+    }
+    std::fs::remove_dir_all(&gitdir).map_err(|err| err.to_string())
 }
 
 pub(crate) fn run_worktree_remove_command_with_recovery(
@@ -1013,6 +1118,126 @@ prunable stale
         assert!(!checkout.exists());
 
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn deferred_remove_unregisters_checkout_and_leaves_files_to_delete() {
+        let repo = create_committed_repo("worktree-deferred-repo");
+        let checkout = unique_temp_path("worktree-deferred-checkout");
+        let add = build_worktree_add_new_branch_command(
+            &repo,
+            &checkout,
+            "worktree/deferred",
+            "HEAD",
+            false,
+        );
+        run_worktree_command(&add).unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "target/\n").unwrap();
+        std::fs::create_dir_all(checkout.join("target")).unwrap();
+        std::fs::write(checkout.join("target/artifact"), "build output\n").unwrap();
+
+        let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+        let removed = run_worktree_remove_deferring_delete(&remove, &repo, &checkout, false, false)
+            .unwrap()
+            .expect("a clean checkout should be moved aside");
+
+        assert!(!checkout.exists());
+        assert!(!worktree_list_contains_path(&repo, &checkout, false).unwrap());
+        assert!(!worktree_list_contains_path(&repo, &removed, false).unwrap());
+        assert!(removed.join("README.md").exists());
+        assert!(removed.join("target/artifact").exists());
+        let admin_dirs = git_common_worktrees_dir(&repo, false).unwrap();
+        assert!(!admin_dirs.exists() || std::fs::read_dir(admin_dirs).unwrap().next().is_none());
+
+        delete_removed_checkout(&removed);
+        assert!(!removed.exists());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn deferred_remove_reports_dirty_checkout_without_touching_it() {
+        let repo = create_committed_repo("worktree-deferred-dirty-repo");
+        let checkout = unique_temp_path("worktree-deferred-dirty-checkout");
+        let add = build_worktree_add_new_branch_command(
+            &repo,
+            &checkout,
+            "worktree/deferred-dirty",
+            "HEAD",
+            false,
+        );
+        run_worktree_command(&add).unwrap();
+        std::fs::write(checkout.join("README.md"), "dirty\n").unwrap();
+
+        let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+        let error = run_worktree_remove_deferring_delete(&remove, &repo, &checkout, false, false)
+            .unwrap_err();
+
+        assert!(is_dirty_worktree_remove_error(&error), "{error}");
+        assert!(checkout.join("README.md").exists());
+        assert!(worktree_list_contains_path(&repo, &checkout, false).unwrap());
+
+        let forced = build_worktree_remove_command(&repo, &checkout, true, false);
+        let removed = run_worktree_remove_deferring_delete(&forced, &repo, &checkout, true, false)
+            .unwrap()
+            .expect("a forced remove should move the checkout aside");
+        assert!(!checkout.exists());
+        delete_removed_checkout(&removed);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn deferred_remove_keeps_submodule_checkout_until_forced() {
+        let repo = create_committed_repo("worktree-deferred-submodule-repo");
+        let submodule = create_committed_repo("worktree-deferred-submodule-source");
+        let checkout = unique_temp_path("worktree-deferred-submodule-checkout");
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                submodule.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        run_git(&repo, &["commit", "--quiet", "-am", "add submodule"]);
+        let add = build_worktree_add_new_branch_command(
+            &repo,
+            &checkout,
+            "worktree/deferred-submodule",
+            "HEAD",
+            false,
+        );
+        run_worktree_command(&add).unwrap();
+        run_git(
+            &checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--quiet",
+            ],
+        );
+
+        let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+        let error = run_worktree_remove_deferring_delete(&remove, &repo, &checkout, false, false)
+            .unwrap_err();
+        assert!(is_dirty_worktree_remove_error(&error), "{error}");
+        assert!(checkout.join("sub/README.md").exists());
+
+        let forced = build_worktree_remove_command(&repo, &checkout, true, false);
+        let removed =
+            run_worktree_remove_deferring_delete(&forced, &repo, &checkout, true, false).unwrap();
+        assert!(removed.is_none());
+        assert!(!checkout.exists());
+        assert!(!worktree_list_contains_path(&repo, &checkout, false).unwrap());
+
+        std::fs::remove_dir_all(repo).unwrap();
+        std::fs::remove_dir_all(submodule).unwrap();
     }
 
     #[test]

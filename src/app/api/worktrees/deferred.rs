@@ -355,13 +355,17 @@ impl App {
         let trust_repository = params.trust_repository;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::worktree::run_worktree_remove_command_with_recovery(
-                &command,
-                &repo_root,
-                &path,
-                force,
-                trust_repository,
-            );
+            let (result, removed_files) =
+                match crate::worktree::run_worktree_remove_deferring_delete(
+                    &command,
+                    &repo_root,
+                    &path,
+                    force,
+                    trust_repository,
+                ) {
+                    Ok(removed_files) => (Ok(()), removed_files),
+                    Err(err) => (Err(err), None),
+                };
             let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
                 crate::events::WorktreeRemoveResult {
                     workspace_id: workspace_internal_id,
@@ -373,6 +377,9 @@ impl App {
                     result,
                 },
             )));
+            if let Some(removed_files) = removed_files {
+                crate::worktree::delete_removed_checkout(&removed_files);
+            }
         });
     }
 
