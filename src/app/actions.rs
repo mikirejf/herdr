@@ -1718,6 +1718,19 @@ impl AppState {
         let change = mutation.effective_state_change.or(unchanged_change)?;
         let suppress_completion = force_suppress_completion
             || (change.state == AgentState::Idle && suppress_acquisition_completion);
+        if self
+            .terminals
+            .get_mut(&terminal_id)
+            .is_some_and(|terminal| {
+                terminal.record_agent_activity(
+                    &change,
+                    agent_released,
+                    crate::wall_clock::unix_now_ms(),
+                )
+            })
+        {
+            self.mark_session_dirty();
+        }
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
@@ -3092,6 +3105,147 @@ mod tests {
             );
         }
         app.assert_invariants_for_test();
+    }
+
+    fn activity_change(
+        previous_label: Option<&str>,
+        label: Option<&str>,
+        previous_state: AgentState,
+        state: AgentState,
+    ) -> crate::terminal::EffectiveStateChange {
+        let presentation = crate::terminal::EffectivePresentation {
+            title: None,
+            display_agent: None,
+            state_labels: std::collections::HashMap::new(),
+        };
+        crate::terminal::EffectiveStateChange {
+            previous_agent_label: previous_label.map(str::to_owned),
+            previous_known_agent: None,
+            previous_state,
+            previous_presentation: presentation.clone(),
+            agent_label: label.map(str::to_owned),
+            known_agent: None,
+            state,
+            presentation,
+        }
+    }
+
+    #[test]
+    fn agent_activity_clock_starts_on_first_sighting_and_follows_work() {
+        let hour = 60 * 60 * 1000;
+        let mut terminal =
+            crate::terminal::TerminalState::new(crate::terminal::TerminalId::alloc(), "/".into());
+        let idle = activity_change(
+            Some("pi"),
+            Some("pi"),
+            AgentState::Unknown,
+            AgentState::Idle,
+        );
+        let working = activity_change(
+            Some("pi"),
+            Some("pi"),
+            AgentState::Idle,
+            AgentState::Working,
+        );
+        let blocked = activity_change(
+            Some("pi"),
+            Some("pi"),
+            AgentState::Idle,
+            AgentState::Blocked,
+        );
+        let finished = activity_change(
+            Some("pi"),
+            Some("pi"),
+            AgentState::Working,
+            AgentState::Idle,
+        );
+
+        assert!(terminal.record_agent_activity(&idle, false, 1_000));
+        assert_eq!(terminal.last_active_unix_ms, Some(1_000));
+
+        assert!(
+            !terminal.record_agent_activity(&idle, false, 1_000 + 10 * hour),
+            "a change that does not involve work keeps the clock"
+        );
+        assert_eq!(terminal.last_active_unix_ms, Some(1_000));
+
+        assert!(!terminal.record_agent_activity(&working, false, 2_000));
+        assert_eq!(
+            terminal.last_active_unix_ms,
+            Some(2_000),
+            "starting work moves the clock, and a small move is not worth saving"
+        );
+        assert!(terminal.record_agent_activity(&blocked, false, 2_000 + hour));
+        assert_eq!(terminal.last_active_unix_ms, Some(2_000 + hour));
+        assert!(!terminal.record_agent_activity(&finished, false, 2_500 + hour));
+        assert_eq!(
+            terminal.last_active_unix_ms,
+            Some(2_500 + hour),
+            "finishing work counts as activity"
+        );
+    }
+
+    #[test]
+    fn agent_activity_clock_restarts_for_a_new_agent_and_clears_on_release() {
+        let mut terminal =
+            crate::terminal::TerminalState::new(crate::terminal::TerminalId::alloc(), "/".into());
+        terminal.last_active_unix_ms = Some(5);
+
+        let replaced = activity_change(
+            Some("pi"),
+            Some("codex"),
+            AgentState::Idle,
+            AgentState::Idle,
+        );
+        assert!(terminal.record_agent_activity(&replaced, false, 9_000_000_000));
+        assert_eq!(terminal.last_active_unix_ms, Some(9_000_000_000));
+
+        let released = activity_change(Some("codex"), None, AgentState::Idle, AgentState::Unknown);
+        assert!(terminal.record_agent_activity(&released, true, 9_000_000_001));
+        assert_eq!(terminal.last_active_unix_ms, None);
+
+        let shell = activity_change(None, None, AgentState::Unknown, AgentState::Unknown);
+        assert!(!terminal.record_agent_activity(&shell, false, 9_000_000_002));
+        assert_eq!(terminal.last_active_unix_ms, None, "a shell has no clock");
+    }
+
+    #[test]
+    fn agent_state_events_record_activity_on_the_terminal() {
+        let mut app = app_with_workspaces(&["active", "background"]);
+        app.active = Some(0);
+        let pane_id = app.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.workspaces[1].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let send = |app: &mut AppState, state: AgentState| {
+            app.handle_app_event(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Pi),
+                state,
+                visible_blocker: state == AgentState::Blocked,
+                visible_working: state == AgentState::Working,
+                process_exited: false,
+                observed_at: Instant::now(),
+            });
+        };
+
+        let before = crate::wall_clock::unix_now_ms();
+        send(&mut app, AgentState::Idle);
+        let first_sighting = app.terminals[&terminal_id]
+            .last_active_unix_ms
+            .expect("first sighting starts the clock");
+        assert!(first_sighting >= before);
+        assert!(app.session_dirty);
+
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .last_active_unix_ms = Some(1);
+        send(&mut app, AgentState::Working);
+        let working = app.terminals[&terminal_id]
+            .last_active_unix_ms
+            .expect("working keeps a clock");
+        assert!(working >= first_sighting);
     }
 
     #[test]

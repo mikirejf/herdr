@@ -184,6 +184,7 @@ pub(super) fn snapshot_with_completions(
                 state_labels,
                 tokens,
                 focused,
+                last_active_unix_ms: agent.last_active_unix_ms,
             }
         })
         .collect();

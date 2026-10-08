@@ -71,6 +71,20 @@ pub(super) fn aggregate_agent_rows<'a>(
     active_endpoint_id: &ClientEndpointId,
     sort: crate::config::AgentPanelSortConfig,
 ) -> Vec<AggregateAgentRow<'a>> {
+    aggregate_agent_rows_at(
+        endpoints,
+        active_endpoint_id,
+        sort,
+        crate::wall_clock::unix_now_ms(),
+    )
+}
+
+pub(super) fn aggregate_agent_rows_at<'a>(
+    endpoints: &'a [ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    sort: crate::config::AgentPanelSortConfig,
+    now_unix_ms: u64,
+) -> Vec<AggregateAgentRow<'a>> {
     let active_index = endpoints
         .iter()
         .position(|endpoint| &endpoint.endpoint_id == active_endpoint_id);
@@ -143,6 +157,15 @@ pub(super) fn aggregate_agent_rows<'a>(
                 });
                 return rows;
             }
+        } else if sort == crate::config::AgentPanelSortConfig::Priority {
+            rows.retain(|row| {
+                row.endpoint.snapshot.agent_view_label.is_some()
+                    || !super::agent_sidebar::hidden_as_stale(
+                        row.agent,
+                        row.attention != 0,
+                        now_unix_ms,
+                    )
+            });
         }
         sort_aggregate_rows(&mut rows, sort);
         return rows;
@@ -150,10 +173,11 @@ pub(super) fn aggregate_agent_rows<'a>(
 
     let mut rows = cached_endpoint_snapshots(endpoints)
         .flat_map(|endpoint| {
-            super::agent_sidebar::ordered_agent_pane_ids(
+            super::agent_sidebar::ordered_agent_pane_ids_at(
                 endpoint.snapshot,
                 sort,
                 Some(endpoint.agent_attention),
+                now_unix_ms,
             )
             .into_iter()
             .filter_map(move |pane_id| {

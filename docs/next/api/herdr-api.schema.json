@@ -6633,6 +6633,15 @@
             "interactive_ready": {
               "type": "boolean"
             },
+            "last_active_unix_ms": {
+              "description": "Wall-clock unix milliseconds when the agent last worked or needed input.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "launch_pending": {
               "type": "boolean"
             },

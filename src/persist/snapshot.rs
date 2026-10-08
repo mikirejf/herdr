@@ -103,6 +103,9 @@ pub struct PaneSnapshot {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Unix milliseconds when the agent last worked or needed input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_agent_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,12 +381,14 @@ fn capture_tab(
                 agent: resume.agent.clone(),
                 argv: resume.argv.clone(),
             });
+        let last_active_unix_ms = terminal.and_then(|terminal| terminal.last_active_unix_ms);
         panes.insert(
             id.raw(),
             PaneSnapshot {
                 cwd,
                 label,
                 agent_name,
+                last_active_unix_ms,
                 managed_agent_kind,
                 agent_session,
                 agent_resume,
@@ -632,6 +637,34 @@ mod tests {
     }
 
     #[test]
+    fn agent_activity_time_round_trips_and_old_panes_load_without_it() {
+        let mut state = state_with_workspaces(&["activity-snapshot"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+
+        let untouched = capture_from_state(&state);
+        let json = serde_json::to_string(&untouched).unwrap();
+        assert!(!json.contains("last_active_unix_ms"));
+
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .last_active_unix_ms = Some(1_700_000_000_123);
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&root.raw()].last_active_unix_ms,
+            Some(1_700_000_000_123)
+        );
+
+        let old_pane: PaneSnapshot = serde_json::from_str(r#"{"cwd":"/tmp"}"#).unwrap();
+        assert_eq!(old_pane.last_active_unix_ms, None);
+    }
+
+    #[test]
     fn layout_fingerprint_survives_json_round_trip() {
         let mut snapshot = parse_snapshot(include_str!(
             "../../tests/fixtures/session/current-herdr-session.json"
@@ -703,6 +736,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
+                last_active_unix_ms: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
@@ -715,6 +749,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
+                last_active_unix_ms: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
@@ -1401,6 +1436,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
+                last_active_unix_ms: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
@@ -1415,6 +1451,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
                 agent_name: None,
+                last_active_unix_ms: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,

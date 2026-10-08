@@ -338,7 +338,7 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
-With `ui.agent_panel_sort = "priority"`, the Agent panel lists agents with a fresh sound notification first, then orders the rest by state. A notification that plays a sound moves its agent to the top, and `focus_agent` index 1 jumps to it, until you see that agent. The newest notification wins, also across machines.
+With `ui.agent_panel_sort = "priority"`, the Agent panel lists agents with a fresh sound notification first, then orders the rest by state. A notification that plays a sound moves its agent to the top, and `focus_agent` index 1 jumps to it, until you see that agent. The newest notification wins, also across machines. The priority view hides idle agents that have not worked or asked for input in the last 3 days, unless they are focused or have a fresh notification. The default grouped view still shows them.
 
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 

@@ -396,6 +396,7 @@ impl App {
             interactive_ready: terminal.managed_agent_interactive_ready(),
             state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
             completion_seq: terminal.last_agent_completion_seq,
+            last_active_unix_ms: terminal.last_active_unix_ms,
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,

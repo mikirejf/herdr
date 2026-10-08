@@ -200,6 +200,7 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
         terminal_title_stripped: None,
         agent_status: AgentStatus::Blocked,
         state_change_seq: 1,
+        last_active_unix_ms: None,
         state_labels: vec![("blocked".into(), "waiting".into())],
         tokens: Vec::new(),
         focused: true,

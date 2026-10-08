@@ -1142,6 +1142,11 @@ pub struct ClientShellAgent {
     pub state_labels: Vec<(String, String)>,
     pub tokens: Vec<(String, String)>,
     pub focused: bool,
+    /// Unix milliseconds when the agent last worked or needed input; older servers omit it.
+    /// No `skip_serializing_if`: the legacy bincode `ServerMessage::ClientShellSnapshot`
+    /// carries this struct, and bincode needs every field written.
+    #[serde(default)]
+    pub last_active_unix_ms: Option<u64>,
 }
 
 /// Origin-relative geometry for one pane in a rendered pane surface.

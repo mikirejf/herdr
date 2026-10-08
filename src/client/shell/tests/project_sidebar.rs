@@ -1074,6 +1074,7 @@ fn add_agents(state: &mut ClientShellState, remote_name: &str) {
             terminal_title_stripped: None,
             agent_status: crate::api::schema::AgentStatus::Idle,
             state_change_seq: 1,
+            last_active_unix_ms: None,
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,

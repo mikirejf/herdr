@@ -17,11 +17,46 @@ pub(super) struct AgentRow {
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
 
+/// How long an idle agent can go without working or needing input before the
+/// priority order stops listing it.
+const STALE_AGENT_HIDE_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(3 * 24 * 60 * 60);
+
+/// Whether the priority order leaves this agent out. Agents that work, need input,
+/// have unseen finished work, hold the focus, or carry a notification stay listed. An agent whose server sent
+/// no activity time (an older server) also stays listed.
+pub(super) fn hidden_as_stale(
+    agent: &crate::protocol::ClientShellAgent,
+    has_attention: bool,
+    now_unix_ms: u64,
+) -> bool {
+    use crate::api::schema::AgentStatus;
+
+    !has_attention
+        && !agent.focused
+        && !matches!(
+            agent.agent_status,
+            AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done
+        )
+        && agent.last_active_unix_ms.is_some_and(|active| {
+            u128::from(now_unix_ms.saturating_sub(active)) > STALE_AGENT_HIDE_AFTER.as_millis()
+        })
+}
+
 /// `attention` holds the panes a sound notification lifted; they lead the priority order.
 pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
     attention: Option<&HashMap<String, u64>>,
+) -> Vec<String> {
+    ordered_agent_pane_ids_at(snapshot, sort, attention, crate::wall_clock::unix_now_ms())
+}
+
+pub(super) fn ordered_agent_pane_ids_at(
+    snapshot: &ClientShellSnapshot,
+    sort: crate::config::AgentPanelSortConfig,
+    attention: Option<&HashMap<String, u64>>,
+    now_unix_ms: u64,
 ) -> Vec<String> {
     if snapshot.agent_view_label.is_some() {
         return snapshot
@@ -38,6 +73,11 @@ pub(super) fn ordered_agent_pane_ids(
     }
     let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
     if sort == crate::config::AgentPanelSortConfig::Priority {
+        agents.retain(|agent| {
+            let has_attention =
+                attention.is_some_and(|attention| attention.contains_key(&agent.pane_id));
+            !hidden_as_stale(agent, has_attention, now_unix_ms)
+        });
         agents.sort_by_key(|agent| {
             (
                 std::cmp::Reverse(

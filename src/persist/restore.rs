@@ -453,6 +453,7 @@ fn unavailable_restored_terminal(
     if let Some(pane) = pane {
         terminal.manual_label = pane.label.clone();
         terminal.launch_argv = pane.launch_argv.clone();
+        terminal.last_active_unix_ms = pane.last_active_unix_ms;
         if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
             terminal.set_persisted_agent_session(session);
         }
@@ -529,6 +530,7 @@ fn restore_tab(
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+        let saved_last_active_unix_ms = saved_pane.and_then(|p| p.last_active_unix_ms);
         let saved_managed_agent = saved_pane
             .and_then(|pane| pane.managed_agent_kind.as_deref())
             .and_then(crate::detect::parse_canonical_agent_label);
@@ -588,6 +590,7 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
+            terminal.last_active_unix_ms = saved_last_active_unix_ms;
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
@@ -688,6 +691,7 @@ fn restore_tab(
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
                     }
                 }
+                terminal.last_active_unix_ms = saved_last_active_unix_ms;
                 if let Some(label) = saved_label {
                     terminal.set_manual_label(label);
                 }
@@ -1465,6 +1469,7 @@ mod tests {
                             cwd,
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
+                            last_active_unix_ms: Some(1_700_000_000_123),
                             managed_agent_kind: Some("opencode".into()),
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:opencode".into(),
@@ -1514,6 +1519,7 @@ mod tests {
         );
         assert_eq!(terminal.agent_name, None);
         assert_eq!(terminal.manual_label.as_deref(), Some("reviewer"));
+        assert_eq!(terminal.last_active_unix_ms, Some(1_700_000_000_123));
         let session = terminal
             .persisted_agent_session
             .as_ref()
@@ -1552,6 +1558,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
+                                last_active_unix_ms: None,
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
@@ -1564,6 +1571,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
+                                last_active_unix_ms: None,
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
@@ -1618,6 +1626,7 @@ mod tests {
                     cwd: cwd.clone(),
                     label: None,
                     agent_name: None,
+                    last_active_unix_ms: None,
                     managed_agent_kind: None,
                     agent_session: None,
                     agent_resume: None,
@@ -1629,6 +1638,7 @@ mod tests {
             cwd: cwd.clone(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
+            last_active_unix_ms: None,
             managed_agent_kind: None,
             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                 source: "herdr:codex".into(),
@@ -1781,6 +1791,7 @@ mod tests {
                             cwd,
                             label: None,
                             agent_name: None,
+                            last_active_unix_ms: None,
                             managed_agent_kind: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:codex".into(),
@@ -2092,6 +2103,7 @@ mod tests {
                 cwd: cwd.clone(),
                 label: None,
                 agent_name: None,
+                last_active_unix_ms: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,

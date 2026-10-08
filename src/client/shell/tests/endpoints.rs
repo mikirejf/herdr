@@ -34,6 +34,7 @@ fn agent(
         terminal_title_stripped: None,
         agent_status: status,
         state_change_seq,
+        last_active_unix_ms: None,
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
@@ -1596,6 +1597,266 @@ fn priority_order(state: &ClientShellState) -> Vec<String> {
     .into_iter()
     .map(|row| row.agent.name.clone().expect("agent name"))
     .collect()
+}
+
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+fn days_ago(days: u64) -> u64 {
+    crate::wall_clock::unix_now_ms() - days * DAY_MS
+}
+
+/// An agent that is not focused and last worked at `last_active`.
+fn quiet_agent(
+    name: &str,
+    pane_id: &str,
+    status: crate::api::schema::AgentStatus,
+    state_change_seq: u64,
+    last_active: Option<u64>,
+) -> ClientShellAgent {
+    ClientShellAgent {
+        focused: false,
+        last_active_unix_ms: last_active,
+        ..agent_on_pane(name, status, state_change_seq, pane_id)
+    }
+}
+
+fn sorted_priority_order(state: &ClientShellState) -> Vec<String> {
+    let mut names = priority_order(state);
+    names.sort();
+    names
+}
+
+#[test]
+fn priority_view_hides_only_idle_agents_without_work_in_three_days() {
+    use crate::api::schema::AgentStatus::{Blocked, Done, Idle, Working};
+
+    // Both ways aggregate rows are built: with and without agent-view projection.
+    for projection_supported in [false, true] {
+        let mut state = priority_state();
+        let mut local = snapshot();
+        local.agents = vec![
+            quiet_agent("old idle", "pane_a", Idle, 1, Some(days_ago(4))),
+            quiet_agent("old done", "pane_b", Done, 1, Some(days_ago(4))),
+            quiet_agent("recent idle", "pane_c", Idle, 1, Some(days_ago(2))),
+            quiet_agent("unknown idle", "pane_d", Idle, 1, None),
+            quiet_agent("old working", "pane_e", Working, 1, Some(days_ago(4))),
+            quiet_agent("old blocked", "pane_f", Blocked, 1, Some(days_ago(4))),
+            quiet_agent("old noticed", "pane_g", Idle, 1, Some(days_ago(4))),
+            ClientShellAgent {
+                last_active_unix_ms: Some(days_ago(4)),
+                ..agent_on_pane("old focused", Idle, 1, "pane_1")
+            },
+        ];
+        state.set_snapshot(Box::new(local));
+        state.set_endpoint_agent_view_projection_supported(
+            &ClientEndpointId::Local,
+            projection_supported,
+        );
+        state.receive_notification(
+            &ClientEndpointId::Local,
+            sound_notification("pane_g", SemanticNotificationSound::Wait),
+            std::time::Instant::now(),
+        );
+
+        assert_eq!(
+            sorted_priority_order(&state),
+            [
+                "old blocked",
+                "old focused",
+                "old noticed",
+                "old working",
+                "recent idle",
+                "unknown idle",
+            ]
+        );
+        let snapshot = state.snapshot.as_deref().expect("active snapshot");
+        let single_machine = agent_sidebar::ordered_agent_pane_ids(
+            snapshot,
+            crate::config::AgentPanelSortConfig::Priority,
+            aggregate_navigation::active_agent_attention(
+                &state.endpoints,
+                &state.active_endpoint_id,
+            ),
+        );
+        assert!(!single_machine.contains(&"pane_a".to_owned()));
+        assert!(!single_machine.contains(&"pane_b".to_owned()));
+        assert_eq!(single_machine.len(), 6);
+    }
+}
+
+#[test]
+fn priority_view_keeps_an_old_agent_with_unseen_finished_work() {
+    use crate::api::schema::AgentStatus::Done;
+
+    let agent = quiet_agent("old done", "pane_a", Done, 1, Some(days_ago(4)));
+    assert!(!agent_sidebar::hidden_as_stale(
+        &agent,
+        false,
+        crate::wall_clock::unix_now_ms(),
+    ));
+}
+
+#[test]
+fn priority_view_hides_an_agent_once_three_days_have_passed() {
+    use crate::api::schema::AgentStatus::Idle;
+
+    let active_at = 1_000_000_000_000;
+    let mut local = snapshot();
+    local.agents = vec![quiet_agent("idle", "pane_a", Idle, 1, Some(active_at))];
+    let order_at = |now| {
+        agent_sidebar::ordered_agent_pane_ids_at(
+            &local,
+            crate::config::AgentPanelSortConfig::Priority,
+            None,
+            now,
+        )
+    };
+
+    assert_eq!(order_at(active_at + 3 * DAY_MS), ["pane_a"]);
+    assert!(order_at(active_at + 3 * DAY_MS + 1).is_empty());
+    assert_eq!(
+        order_at(active_at - 1),
+        ["pane_a"],
+        "an activity time ahead of this clock keeps the agent"
+    );
+}
+
+#[test]
+fn spaces_order_keeps_idle_agents_without_recent_work() {
+    use crate::api::schema::AgentStatus::Idle;
+
+    let mut state = priority_state();
+    let mut local = snapshot();
+    local.agents = vec![quiet_agent(
+        "old idle",
+        "pane_a",
+        Idle,
+        1,
+        Some(days_ago(4)),
+    )];
+    state.set_snapshot(Box::new(local));
+
+    let rows = aggregate_navigation::aggregate_agent_rows(
+        &state.endpoints,
+        &state.active_endpoint_id,
+        crate::config::AgentPanelSortConfig::Spaces,
+    );
+    assert_eq!(rows.len(), 1);
+    let snapshot = state.snapshot.as_deref().expect("active snapshot");
+    assert_eq!(
+        agent_sidebar::ordered_agent_pane_ids(
+            snapshot,
+            crate::config::AgentPanelSortConfig::Spaces,
+            None
+        ),
+        ["pane_a"]
+    );
+}
+
+#[test]
+fn priority_view_keeps_stale_agents_when_a_server_agent_view_is_active() {
+    use crate::api::schema::AgentStatus::Idle;
+
+    let mut local = snapshot();
+    local.agent_view_label = Some("focus".into());
+    local.agent_order = vec!["pane_a".into()];
+    local.agents = vec![quiet_agent(
+        "old idle",
+        "pane_a",
+        Idle,
+        1,
+        Some(days_ago(4)),
+    )];
+
+    assert_eq!(
+        agent_sidebar::ordered_agent_pane_ids(
+            &local,
+            crate::config::AgentPanelSortConfig::Priority,
+            None
+        ),
+        ["pane_a"]
+    );
+}
+
+fn agent_navigation_target(
+    state: &mut ClientShellState,
+    action: crate::input::KeybindAction,
+) -> Option<String> {
+    let mut input = ClientShellInput::default();
+    state.record_binding(crate::input::KeybindMatch::Action(action), &mut input);
+    match &input.actions[..] {
+        [] => None,
+        [ClientShellAction::Endpoint { request, .. }] => match &request.method {
+            crate::api::schema::Method::PaneFocus(target) => Some(target.pane_id.clone()),
+            _ => panic!("agent navigation should focus a pane"),
+        },
+        [ClientShellAction::Keybind(_)] => None,
+        other => panic!("agent navigation should send one request, got {other:?}"),
+    }
+}
+
+#[test]
+fn hidden_stale_agents_drop_out_of_rows_indexes_and_navigation() {
+    use crate::api::schema::AgentStatus::{Blocked, Idle};
+    use crate::input::KeybindAction;
+
+    let mut state = priority_state();
+    let mut local = snapshot();
+    local.agents = vec![
+        ClientShellAgent {
+            focused: true,
+            ..quiet_agent("focused", "pane_1", Blocked, 1, Some(days_ago(1)))
+        },
+        quiet_agent("stale", "pane_2", Idle, 9, Some(days_ago(4))),
+        quiet_agent("second", "pane_3", Idle, 5, Some(days_ago(1))),
+        quiet_agent("third", "pane_4", Idle, 4, Some(days_ago(1))),
+    ];
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+
+    assert_eq!(priority_order(&state), ["focused", "second", "third"]);
+    let indexes = aggregate_navigation::focus_indexes(
+        &state.endpoints,
+        &state.active_endpoint_id,
+        crate::config::AgentPanelSortConfig::Priority,
+    );
+    let index_of = |pane_id: &str| {
+        indexes
+            .get(&(ClientEndpointId::Local, pane_id.to_owned()))
+            .copied()
+    };
+    assert_eq!(index_of("pane_1"), Some(1));
+    assert_eq!(index_of("pane_2"), None);
+    assert_eq!(index_of("pane_3"), Some(2));
+    assert_eq!(index_of("pane_4"), Some(3));
+
+    state.compose(106, 30).expect("agent sidebar frame");
+    let rendered = state
+        .hits
+        .agents
+        .iter()
+        .map(|(_, pane_id)| pane_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(rendered, ["pane_1", "pane_3", "pane_4"]);
+
+    let target = |state: &mut ClientShellState, action| agent_navigation_target(state, action);
+    assert_eq!(
+        target(&mut state, KeybindAction::FocusAgent(1)).as_deref(),
+        Some("pane_3")
+    );
+    assert_eq!(
+        target(&mut state, KeybindAction::FocusAgent(2)).as_deref(),
+        Some("pane_4")
+    );
+    assert_eq!(target(&mut state, KeybindAction::FocusAgent(3)), None);
+    assert_eq!(
+        target(&mut state, KeybindAction::NextAgent).as_deref(),
+        Some("pane_3")
+    );
+    assert_eq!(
+        target(&mut state, KeybindAction::PreviousAgent).as_deref(),
+        Some("pane_4")
+    );
 }
 
 #[test]

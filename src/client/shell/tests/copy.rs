@@ -1138,6 +1138,7 @@ fn navigator_searches_ancestor_context_and_keeps_split_agents_individually_actio
         terminal_title_stripped: None,
         agent_status: AgentStatus::Working,
         state_change_seq: 1,
+        last_active_unix_ms: None,
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,

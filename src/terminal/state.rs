@@ -84,6 +84,10 @@ struct ManagedAgent {
     phase: ManagedAgentPhase,
 }
 
+/// The saved activity time may lag the live one by this much, so working agents
+/// do not trigger a session save on every state change.
+const ACTIVITY_SAVE_GRANULARITY_MS: u64 = 60 * 60 * 1000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveStateChange {
     pub previous_agent_label: Option<String>,
@@ -155,6 +159,8 @@ pub struct TerminalState {
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
     pub last_agent_completion_seq: Option<u64>,
+    /// Wall-clock unix milliseconds when the current agent last worked or needed input.
+    pub last_active_unix_ms: Option<u64>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -195,6 +201,7 @@ impl TerminalState {
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
+            last_active_unix_ms: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -252,6 +259,36 @@ impl TerminalState {
         self.state = snapshot.authority.state;
         self.hook_authority = Some(snapshot.authority);
         self.agent_process_acquisition_pending = snapshot.acquisition_pending;
+    }
+
+    /// Starts or advances the agent's activity clock for one state change.
+    ///
+    /// The clock restarts when the agent changes, so a new agent never inherits
+    /// a stale time from the one it replaced, and clears when the agent is gone.
+    /// A change that neither involves working or blocked nor changes the agent
+    /// leaves a running clock alone, so restoring an idle agent keeps its time.
+    /// Returns true when the stored time moved far enough to be worth saving.
+    pub(crate) fn record_agent_activity(
+        &mut self,
+        change: &EffectiveStateChange,
+        agent_released: bool,
+        now_unix_ms: u64,
+    ) -> bool {
+        if agent_released || change.agent_label.is_none() {
+            return self.last_active_unix_ms.take().is_some();
+        }
+        let is_active = |state| matches!(state, AgentState::Working | AgentState::Blocked);
+        let starts_clock = self.last_active_unix_ms.is_none()
+            || change.previous_agent_label != change.agent_label
+            || is_active(change.previous_state)
+            || is_active(change.state);
+        if !starts_clock {
+            return false;
+        }
+        match self.last_active_unix_ms.replace(now_unix_ms) {
+            Some(previous) => now_unix_ms.saturating_sub(previous) >= ACTIVITY_SAVE_GRANULARITY_MS,
+            None => true,
+        }
     }
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {
@@ -2342,6 +2379,7 @@ impl TerminalState {
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
+        self.last_active_unix_ms = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
