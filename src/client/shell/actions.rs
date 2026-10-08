@@ -101,11 +101,16 @@ impl ClientShellState {
                     if self.config.prompt_new_workspace_name {
                         self.open_new_workspace_overlay();
                     } else {
+                        let (source_workspace_id, cwd) = if self.project_grouping() {
+                            (None, Some(Self::NEW_WORKSPACE_HOME_CWD.to_owned()))
+                        } else {
+                            (self.workspace_action_id(), None)
+                        };
                         self.push_endpoint_method(
                             crate::api::schema::Method::WorkspaceCreate(
                                 crate::api::schema::WorkspaceCreateParams {
-                                    source_workspace_id: self.workspace_action_id(),
-                                    cwd: None,
+                                    source_workspace_id,
+                                    cwd,
                                     focus: true,
                                     label: None,
                                     env: Default::default(),

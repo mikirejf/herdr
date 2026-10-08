@@ -327,20 +327,30 @@ impl ClientShellState {
     }
 
     pub(super) fn open_new_workspace_overlay(&mut self) {
-        let source_workspace_id = self.workspace_action_id();
-        let cwd = self.snapshot.as_deref().and_then(|snapshot| {
-            let workspace_id = source_workspace_id.as_deref()?;
-            snapshot
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id == workspace_id)
-                .map(|workspace| workspace.new_workspace_cwd.clone())
-        });
-        let suggested_name = cwd
-            .as_deref()
-            .map(std::path::Path::new)
-            .map(crate::workspace::derive_label_from_cwd)
-            .unwrap_or_else(|| "workspace".to_owned());
+        let (source_workspace_id, cwd, suggested_name) = if self.project_grouping() {
+            // The server names a workspace started in the home folder "~".
+            (
+                None,
+                Some(Self::NEW_WORKSPACE_HOME_CWD.to_owned()),
+                "~".to_owned(),
+            )
+        } else {
+            let source_workspace_id = self.workspace_action_id();
+            let cwd = self.snapshot.as_deref().and_then(|snapshot| {
+                let workspace_id = source_workspace_id.as_deref()?;
+                snapshot
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == workspace_id)
+                    .map(|workspace| workspace.new_workspace_cwd.clone())
+            });
+            let suggested_name = cwd
+                .as_deref()
+                .map(std::path::Path::new)
+                .map(crate::workspace::derive_label_from_cwd)
+                .unwrap_or_else(|| "workspace".to_owned());
+            (source_workspace_id, cwd, suggested_name)
+        };
         self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
             title: "new workspace",
             input: TextEditor::new(&suggested_name, true),

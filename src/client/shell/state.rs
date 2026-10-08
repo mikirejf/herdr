@@ -1235,6 +1235,12 @@ impl ClientShellState {
         }
     }
 
+    /// Project rows group workspaces by repository, so a new workspace that followed the
+    /// focused pane's folder would join that pane's project. In project mode it starts in
+    /// the home folder instead, as a project of its own. The server expands `~` to its own
+    /// home folder, so the client never needs to know it.
+    pub(super) const NEW_WORKSPACE_HOME_CWD: &str = "~";
+
     pub(super) fn project_grouping(&self) -> bool {
         self.config.sidebar_group_by == crate::config::SidebarGroupBy::Project
     }

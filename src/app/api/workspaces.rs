@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCloseParams,
     WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
@@ -55,12 +53,15 @@ impl App {
                 None => self.workspace_creation_source(),
             }
         };
-        let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
-            source_workspace_index.map_or_else(
-                || self.resolve_new_terminal_cwd(None),
-                |index| self.resolved_new_workspace_cwd_from(index),
-            )
-        });
+        let cwd = params
+            .cwd
+            .map(|cwd| crate::worktree::expand_tilde_path(&cwd))
+            .unwrap_or_else(|| {
+                source_workspace_index.map_or_else(
+                    || self.resolve_new_terminal_cwd(None),
+                    |index| self.resolved_new_workspace_cwd_from(index),
+                )
+            });
         let extra_env = match super::env::normalize_launch_env(params.env) {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
@@ -548,6 +549,50 @@ mod tests {
         );
         shutdown_test_runtimes(&mut app);
         let _ = std::fs::remove_dir_all(&source_cwd);
+    }
+
+    #[tokio::test]
+    async fn workspace_create_expands_tilde_cwd_to_home() {
+        use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
+        use crate::config::ShellModeConfig;
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = ShellModeConfig::NonLogin;
+        app.state.workspaces = vec![Workspace::test_new("spaces")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+
+        let response = app.handle_workspace_create(
+            "req".into(),
+            WorkspaceCreateParams {
+                source_workspace_id: None,
+                cwd: Some("~".into()),
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceCreated { .. }
+        ));
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(
+            crate::worktree::canonical_or_original(&app.state.workspaces[1].identity_cwd),
+            crate::worktree::canonical_or_original(&home)
+        );
+        shutdown_test_runtimes(&mut app);
     }
 
     fn app_with_linked_worktree() -> App {

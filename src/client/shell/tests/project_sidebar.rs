@@ -974,7 +974,9 @@ fn footer_asks_which_machine_when_several_are_online() {
     assert!(matches!(
         &request.method,
         crate::api::schema::Method::WorkspaceCreate(params)
-            if params.focus && params.source_workspace_id.as_deref() == Some("rws_1")
+            if params.focus
+                && params.source_workspace_id.is_none()
+                && params.cwd.as_deref() == Some("~")
     ));
 }
 
@@ -987,9 +989,9 @@ fn footer_pick_prompts_for_the_name_on_the_chosen_machine() {
     assert!(matches!(
         &state.overlay,
         Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-            target: ClientRenameTarget::NewWorkspace { source_workspace_id: Some(id), .. },
+            target: ClientRenameTarget::NewWorkspace { source_workspace_id: None, cwd: Some(cwd), .. },
             ..
-        })) if id == "ws_1"
+        })) if cwd == "~"
     ));
 
     state.overlay = None;
@@ -999,9 +1001,9 @@ fn footer_pick_prompts_for_the_name_on_the_chosen_machine() {
     assert!(matches!(
         &state.overlay,
         Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-            target: ClientRenameTarget::NewWorkspace { source_workspace_id: Some(id), .. },
+            target: ClientRenameTarget::NewWorkspace { source_workspace_id: None, cwd: Some(cwd), .. },
             ..
-        })) if id == "rws_1"
+        })) if cwd == "~"
     ));
 }
 
@@ -1017,7 +1019,10 @@ fn footer_creates_at_once_with_one_machine_online() {
     assert_eq!(endpoint_id, &ClientEndpointId::Local);
     assert!(matches!(
         &request.method,
-        crate::api::schema::Method::WorkspaceCreate(params) if params.focus
+        crate::api::schema::Method::WorkspaceCreate(params)
+            if params.focus
+                && params.source_workspace_id.is_none()
+                && params.cwd.as_deref() == Some("~")
     ));
 }
 
@@ -1032,7 +1037,8 @@ fn machine_grouping_keeps_its_footer_and_menus() {
     assert_eq!(endpoint_id, &ClientEndpointId::Local);
     assert!(matches!(
         &request.method,
-        crate::api::schema::Method::WorkspaceCreate(_)
+        crate::api::schema::Method::WorkspaceCreate(params)
+            if params.cwd.is_none()
     ));
 
     state.compose(100, 40).expect("machine sidebar");
