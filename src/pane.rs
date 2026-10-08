@@ -1031,8 +1031,8 @@ fn spawn_basic_detection_task(
                 DetectionScreenReadDecision::Skip => continue,
             }
 
-            let content_changed =
-                last_detection_text.refresh(agent, &content_seq, || terminal.detection_text());
+            let content_changed = last_detection_text
+                .refresh(agent, &content_seq, || terminal.detection_text_for_cache());
             let content = &last_detection_text.text;
             last_screen_scan_detection_content_seq = current_detection_content_seq;
             let osc_title = terminal.agent_osc_title();
@@ -3031,8 +3031,9 @@ impl PaneRuntime {
                     }
 
                     let content_changed =
-                        last_detection_text
-                            .refresh(agent, &text_content_seq, || terminal.detection_text());
+                        last_detection_text.refresh(agent, &text_content_seq, || {
+                            terminal.detection_text_for_cache()
+                        });
                     let content = &last_detection_text.text;
                     last_screen_scan_detection_content_seq = current_detection_content_seq;
                     let osc_title = terminal.agent_osc_title();
@@ -3928,7 +3929,6 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn unidentified_text_cache_tracks_runtime_mutations_not_viewport_scroll() {
         let runtime = PaneRuntime::test_with_scrollback_bytes(
@@ -3942,7 +3942,7 @@ mod tests {
         let refresh = |cache: &mut DetectionTextCache| {
             cache.refresh(None, &runtime.content_seq, || {
                 reads.set(reads.get() + 1);
-                runtime.terminal.detection_text()
+                runtime.terminal.detection_text_for_cache()
             })
         };
         assert!(
