@@ -36,6 +36,8 @@ pub enum Subscription {
     WorktreeCreated {},
     #[serde(rename = "worktree.opened")]
     WorktreeOpened {},
+    #[serde(rename = "worktree.removing")]
+    WorktreeRemoving {},
     #[serde(rename = "worktree.removed")]
     WorktreeRemoved {},
     #[serde(rename = "tab.created")]
@@ -202,6 +204,7 @@ pub enum EventKind {
     WorkspaceFocused,
     WorktreeCreated,
     WorktreeOpened,
+    WorktreeRemoving,
     WorktreeRemoved,
     TabCreated,
     TabClosed,
@@ -233,6 +236,7 @@ impl EventKind {
             EventKind::WorkspaceFocused => "workspace.focused",
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
+            EventKind::WorktreeRemoving => "worktree.removing",
             EventKind::WorktreeRemoved => "worktree.removed",
             EventKind::TabCreated => "tab.created",
             EventKind::TabClosed => "tab.closed",
@@ -265,6 +269,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceFocused,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
+    EventKind::WorktreeRemoving,
     EventKind::WorktreeRemoved,
     EventKind::TabCreated,
     EventKind::TabClosed,
@@ -293,6 +298,7 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceFocused,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
+    EventKind::WorktreeRemoving,
     EventKind::WorktreeRemoved,
     EventKind::TabCreated,
     EventKind::TabClosed,
@@ -460,6 +466,12 @@ pub enum EventData {
         workspace: WorkspaceInfo,
         worktree: WorktreeInfo,
         already_open: bool,
+    },
+    WorktreeRemoving {
+        workspace_id: String,
+        workspace: WorkspaceInfo,
+        worktree: WorktreeInfo,
+        forced: bool,
     },
     WorktreeRemoved {
         workspace_id: String,

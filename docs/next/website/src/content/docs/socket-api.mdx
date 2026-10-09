@@ -365,7 +365,7 @@ Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create
 
 `worktree.open_checkout` takes the same parameters as `worktree.open`. It differs the same way: `worktree.open` opens a workspace for the repository's main checkout when none is open, and `worktree.open_checkout` does not. Opening the main checkout itself still opens its workspace.
 
-Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
+Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removing` before Git moves the checkout and `worktree.removed` after; if the linked workspace is still open, it also emits `workspace.closed`.
 
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
 
@@ -578,6 +578,10 @@ List recent action and event command logs:
 
 Event hooks run for enabled installed plugins when Herdr emits a matching event
 name such as `worktree.created`.
+
+Herdr waits up to 10 seconds for `worktree.removing` hook commands to exit
+before it moves the checkout, so a hook can stop processes that still run
+inside it. Other event hooks run without blocking Herdr.
 
 There is no Herdr-managed plugin storage API in v1. `HERDR_PLUGIN_CONFIG_DIR`
 and `HERDR_PLUGIN_STATE_DIR` are path discovery only; plugins own their files,
@@ -838,7 +842,7 @@ updated `PaneLayoutSnapshot` for one tab. Clients maintaining a cache with
 `session.snapshot` should use this event to refresh the affected layout through
 an authoritative read; a delayed payload may predate their latest snapshot.
 
-Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
+Worktree event subscriptions include `worktree.created`, `worktree.opened`, `worktree.removing`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removing` includes the `workspace_id`, the still-open `workspace`, the `worktree` about to be removed, and `forced`; the removal can still fail after it, for example on a dirty checkout without `force`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
 
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
 

@@ -46,7 +46,8 @@ impl App {
             | EventData::WorkspaceUpdated { workspace }
             | EventData::WorkspaceMetadataUpdated { workspace }
             | EventData::WorktreeCreated { workspace, .. }
-            | EventData::WorktreeOpened { workspace, .. } => {
+            | EventData::WorktreeOpened { workspace, .. }
+            | EventData::WorktreeRemoving { workspace, .. } => {
                 self.plugin_context_for_workspace_info(workspace, correlation_id)
             }
             EventData::WorkspaceClosed {

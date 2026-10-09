@@ -143,6 +143,9 @@ impl ActiveSubscription {
             }
             Subscription::WorktreeCreated {} => Ok(event_subscription(EventKind::WorktreeCreated)),
             Subscription::WorktreeOpened {} => Ok(event_subscription(EventKind::WorktreeOpened)),
+            Subscription::WorktreeRemoving {} => {
+                Ok(event_subscription(EventKind::WorktreeRemoving))
+            }
             Subscription::WorktreeRemoved {} => Ok(event_subscription(EventKind::WorktreeRemoved)),
             Subscription::TabCreated {} => Ok(event_subscription(EventKind::TabCreated)),
             Subscription::TabClosed {} => Ok(event_subscription(EventKind::TabClosed)),

@@ -11,6 +11,8 @@ use crate::events::{ApiWorktreeAddRequest, ApiWorktreeRemoveRequest, AppEvent};
 use super::super::responses::{encode_error, encode_success};
 use super::{absolute_user_path, WorktreeSource};
 
+const WORKTREE_REMOVING_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl App {
     pub(crate) fn handle_deferred_worktree_api_request(
         &mut self,
@@ -336,6 +338,15 @@ impl App {
             .insert(checkout_key.clone(), operation_id);
         let workspace_snapshot = self.workspace_info(ws_idx);
         let worktree = self.worktree_info_for_membership(&space, None);
+        let removing_hooks_done = self.emit_event_with_hooks_done(EventEnvelope {
+            event: EventKind::WorktreeRemoving,
+            data: EventData::WorktreeRemoving {
+                workspace_id: workspace_snapshot.workspace_id.clone(),
+                workspace: workspace_snapshot.clone(),
+                worktree: worktree.clone(),
+                forced: params.force,
+            },
+        });
         let command = crate::worktree::build_worktree_remove_command(
             &space.repo_root,
             &space.checkout_path,
@@ -355,6 +366,16 @@ impl App {
         let trust_repository = params.trust_repository;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
+            // Hooks get a bounded head start so they can stop processes that
+            // still run inside the checkout before Git moves it away.
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                removing_hooks_done.recv_timeout(WORKTREE_REMOVING_HOOK_TIMEOUT)
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    "worktree.removing hooks still running after timeout; removing anyway"
+                );
+            }
             let (result, removed_files) =
                 match crate::worktree::run_worktree_remove_deferring_delete(
                     &command,

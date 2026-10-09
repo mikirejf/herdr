@@ -302,6 +302,34 @@
                   "type": "boolean"
                 },
                 "type": {
+                  "const": "worktree_removing",
+                  "type": "string"
+                },
+                "workspace": {
+                  "$ref": "#/schemas/event/$defs/WorkspaceInfo"
+                },
+                "workspace_id": {
+                  "type": "string"
+                },
+                "worktree": {
+                  "$ref": "#/schemas/event/$defs/WorktreeInfo"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_id",
+                "workspace",
+                "worktree",
+                "forced"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "forced": {
+                  "type": "boolean"
+                },
+                "type": {
                   "const": "worktree_removed",
                   "type": "string"
                 },
@@ -738,6 +766,7 @@
             "workspace_focused",
             "worktree_created",
             "worktree_opened",
+            "worktree_removing",
             "worktree_removed",
             "tab_created",
             "tab_closed",
@@ -4032,6 +4061,18 @@
             {
               "properties": {
                 "type": {
+                  "const": "worktree.removing",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "worktree.removed",
                   "type": "string"
                 }
@@ -7063,6 +7104,34 @@
                   "type": "boolean"
                 },
                 "type": {
+                  "const": "worktree_removing",
+                  "type": "string"
+                },
+                "workspace": {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceInfo"
+                },
+                "workspace_id": {
+                  "type": "string"
+                },
+                "worktree": {
+                  "$ref": "#/schemas/success_response/$defs/WorktreeInfo"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_id",
+                "workspace",
+                "worktree",
+                "forced"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "forced": {
+                  "type": "boolean"
+                },
+                "type": {
                   "const": "worktree_removed",
                   "type": "string"
                 },
@@ -7514,6 +7583,7 @@
             "workspace_focused",
             "worktree_created",
             "worktree_opened",
+            "worktree_removing",
             "worktree_removed",
             "tab_created",
             "tab_closed",

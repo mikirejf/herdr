@@ -208,6 +208,7 @@ impl App {
             action.command.clone(),
             &context,
             None,
+            None,
         ) {
             Ok(log) => log,
             Err((code, message)) => return encode_error(id, code, message),
@@ -249,6 +250,7 @@ impl App {
             None,
             action.command,
             &context,
+            None,
             None,
         )
         .map(|_| ())
@@ -400,6 +402,7 @@ impl App {
             None,
             action.command,
             &context,
+            None,
             None,
         )
         .map(|_| true)

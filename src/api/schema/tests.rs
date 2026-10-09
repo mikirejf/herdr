@@ -867,6 +867,7 @@ fn worktree_lifecycle_events_round_trip() {
             subscriptions: vec![
                 Subscription::WorktreeCreated {},
                 Subscription::WorktreeOpened {},
+                Subscription::WorktreeRemoving {},
                 Subscription::WorktreeRemoved {},
             ],
         }),
@@ -874,6 +875,7 @@ fn worktree_lifecycle_events_round_trip() {
     let json = serde_json::to_string(&subscription).unwrap();
     assert!(json.contains("\"type\":\"worktree.created\""));
     assert!(json.contains("\"type\":\"worktree.opened\""));
+    assert!(json.contains("\"type\":\"worktree.removing\""));
     assert!(json.contains("\"type\":\"worktree.removed\""));
     let restored: Request = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, subscription);
@@ -921,6 +923,15 @@ fn worktree_lifecycle_events_round_trip() {
                 workspace: workspace.clone(),
                 worktree: worktree.clone(),
                 already_open: false,
+            },
+        },
+        EventEnvelope {
+            event: EventKind::WorktreeRemoving,
+            data: EventData::WorktreeRemoving {
+                workspace_id: "w_2".into(),
+                workspace: workspace.clone(),
+                worktree: worktree.clone(),
+                forced: false,
             },
         },
         EventEnvelope {

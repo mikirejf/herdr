@@ -661,6 +661,20 @@ mod tests {
     }
 
     fn install_event_plugin(app: &mut App, name: &str, event: &str) -> PathBuf {
+        install_event_plugin_with_command(
+            app,
+            name,
+            event,
+            vec!["sh".into(), "-c".into(), "true".into()],
+        )
+    }
+
+    fn install_event_plugin_with_command(
+        app: &mut App,
+        name: &str,
+        event: &str,
+        command: Vec<String>,
+    ) -> PathBuf {
         let plugin_root = unique_temp_path(name);
         std::fs::create_dir_all(&plugin_root).unwrap();
         let manifest_path = plugin_root.join("herdr-plugin.toml");
@@ -683,7 +697,7 @@ mod tests {
                 events: vec![crate::api::schema::PluginManifestEventHook {
                     on: event.into(),
                     platforms: None,
-                    command: vec!["sh".into(), "-c".into(), "true".into()],
+                    command,
                 }],
                 panes: Vec::new(),
                 link_handlers: Vec::new(),
@@ -2405,7 +2419,11 @@ mod tests {
                 .into_iter()
                 .map(|(_, event)| event.event)
                 .collect::<Vec<_>>(),
-            vec![EventKind::WorkspaceClosed, EventKind::WorktreeRemoved]
+            vec![
+                EventKind::WorktreeRemoving,
+                EventKind::WorkspaceClosed,
+                EventKind::WorktreeRemoved
+            ]
         );
         assert!(app.state.plugin_command_logs.iter().any(|log| {
             log.event.as_deref() == Some("worktree.removed")
@@ -2415,6 +2433,102 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(plugin_root);
+    }
+
+    #[test]
+    fn deferred_api_worktree_remove_waits_for_removing_hooks_before_moving_checkout() {
+        let repo = create_committed_repo("api-worktree-removing-hook-repo");
+        let checkout = unique_temp_path("api-worktree-removing-hook-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "worktree/api-removing-hook",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let marker = unique_temp_path("api-worktree-removing-hook-marker");
+
+        let event_hub = crate::api::EventHub::default();
+        let mut app = test_app_with_event_hub(event_hub.clone());
+        let mut child = Workspace::test_new("child");
+        child.identity_cwd = checkout.clone();
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: crate::workspace::git_space_metadata(&repo).unwrap().key,
+            label: "api-worktree-removing-hook-repo".into(),
+            repo_root: repo.clone(),
+            checkout_path: checkout.clone(),
+            is_linked_worktree: true,
+        });
+        let child_id = child.id.clone();
+        app.state.workspaces.push(child);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        // The sleep makes the hook finish well after the remove thread starts,
+        // so the marker only appears if removal waits for the hook.
+        let plugin_root = install_event_plugin_with_command(
+            &mut app,
+            "removing-hook",
+            "worktree.removing",
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "sleep 0.5; test -e '{}/.git' && touch '{}'",
+                    checkout.display(),
+                    marker.display()
+                ),
+            ],
+        );
+        let (respond_to, response_rx) = response_channel();
+
+        assert!(app.handle_deferred_worktree_api_request(
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeRemove(WorktreeRemoveParams {
+                    workspace_id: child_id.clone(),
+                    force: false,
+                    trust_repository: false,
+                }),
+            },
+            respond_to,
+            false,
+        ));
+        assert!(app.state.plugin_command_logs.iter().any(|log| {
+            log.event.as_deref() == Some("worktree.removing")
+                && log.status == crate::api::schema::PluginCommandStatus::Running
+        }));
+
+        let event = loop {
+            let event = wait_for_app_event(&mut app);
+            if matches!(event, AppEvent::WorktreeRemoveFinished(_)) {
+                break event;
+            }
+            app.handle_internal_event(event);
+        };
+        assert!(
+            marker.exists(),
+            "worktree.removing hook should run while the checkout still exists"
+        );
+        assert!(!checkout.exists());
+        app.handle_internal_event(event);
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("deferred worktree remove should respond after completion event");
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorktreeRemoved { .. }
+        ));
+
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(plugin_root);
+        let _ = std::fs::remove_file(marker);
     }
 
     #[test]

@@ -21,6 +21,7 @@ impl App {
         command: Vec<String>,
         context: &PluginInvocationContext,
         event_json: Option<String>,
+        done: Option<std::sync::mpsc::Sender<()>>,
     ) -> Result<PluginCommandLogInfo, (&'static str, String)> {
         let Some(program) = command.first().cloned() else {
             return Err((
@@ -176,6 +177,7 @@ impl App {
                 },
             };
             let _ = event_tx.blocking_send(finished);
+            drop(done);
         });
         Ok(log)
     }
@@ -210,19 +212,26 @@ impl App {
                     startup.command,
                     &context,
                     None,
+                    None,
                 );
             }
         }
     }
 
-    pub(crate) fn run_plugin_event_hooks(&mut self, event: &crate::api::schema::EventEnvelope) {
+    /// Starts the hook commands for `event`. The returned receiver disconnects
+    /// once every started command has exited; nothing is ever sent on it.
+    pub(crate) fn run_plugin_event_hooks(
+        &mut self,
+        event: &crate::api::schema::EventEnvelope,
+    ) -> std::sync::mpsc::Receiver<()> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let event_name = event.event.dot_name();
         if !crate::api::schema::PLUGIN_HOOK_EVENT_KINDS.contains(&event.event) {
-            return;
+            return done_rx;
         }
         if let Err(err) = self.refresh_installed_plugins() {
             tracing::warn!(err = %err, "failed to refresh plugin registry before event hooks");
-            return;
+            return done_rx;
         }
         let plugins = self
             .state
@@ -236,7 +245,7 @@ impl App {
             .cloned()
             .collect::<Vec<_>>();
         if plugins.is_empty() {
-            return;
+            return done_rx;
         }
         let event_json = serde_json::to_string(event).ok();
         let context = self.plugin_context_for_event(event, event_name);
@@ -260,9 +269,11 @@ impl App {
                     hook.command.clone(),
                     &context,
                     event_json.clone(),
+                    Some(done_tx.clone()),
                 );
             }
         }
+        done_rx
     }
 
     fn push_plugin_command_log(&mut self, log: PluginCommandLogInfo) {

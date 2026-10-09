@@ -760,8 +760,18 @@ impl App {
     }
 
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
-        self.run_plugin_event_hooks(&event);
+        let _hooks_done = self.emit_event_with_hooks_done(event);
+    }
+
+    /// Like `emit_event`, but returns a receiver that disconnects once every
+    /// plugin hook command started for the event has exited.
+    pub(super) fn emit_event_with_hooks_done(
+        &mut self,
+        event: crate::api::schema::EventEnvelope,
+    ) -> std::sync::mpsc::Receiver<()> {
+        let hooks_done = self.run_plugin_event_hooks(&event);
         self.event_hub.push(event);
+        hooks_done
     }
 
     pub(crate) fn emit_pane_updated(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
