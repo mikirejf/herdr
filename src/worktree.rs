@@ -457,22 +457,26 @@ pub(crate) fn run_worktree_remove_command_with_recovery(
 ) -> Result<(), String> {
     match run_worktree_command(command) {
         Ok(()) => Ok(()),
-        Err(err) if force && is_not_working_tree_remove_error(&err) => {
+        Err(err) if is_not_working_tree_remove_error(&err) => {
             if worktree_list_contains_path(repo_root, path, trust_repository)? {
                 return Err(err);
             }
-            if path.exists() {
-                if !leftover_worktree_checkout_matches_repo(repo_root, path, trust_repository) {
-                    return Err(err);
-                }
-                std::fs::remove_dir_all(path).map_err(|remove_err| {
-                    format!(
-                        "{err}; failed to remove leftover checkout {}: {remove_err}",
-                        path.display()
-                    )
-                })?;
+            // Nothing is left to delete, so the removal already happened elsewhere.
+            if !path.exists() {
+                return Ok(());
             }
-            Ok(())
+            if !force {
+                return Err(err);
+            }
+            if !leftover_worktree_checkout_matches_repo(repo_root, path, trust_repository) {
+                return Err(err);
+            }
+            std::fs::remove_dir_all(path).map_err(|remove_err| {
+                format!(
+                    "{err}; failed to remove leftover checkout {}: {remove_err}",
+                    path.display()
+                )
+            })
         }
         Err(err) => Err(err),
     }
@@ -1238,6 +1242,42 @@ prunable stale
 
         std::fs::remove_dir_all(repo).unwrap();
         std::fs::remove_dir_all(submodule).unwrap();
+    }
+
+    #[test]
+    fn worktree_remove_succeeds_when_checkout_is_already_gone() {
+        let repo = create_committed_repo("worktree-already-gone-repo");
+        let checkout = unique_temp_path("worktree-already-gone-checkout");
+        let branch = "worktree/already-gone";
+
+        let add = build_worktree_add_new_branch_command(&repo, &checkout, branch, "HEAD", false);
+        run_worktree_command(&add).unwrap();
+        let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+        run_worktree_command(&remove).unwrap();
+
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, false, false)
+            .expect("an already removed checkout should count as removed");
+
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn unforced_worktree_remove_keeps_leftover_unregistered_checkout() {
+        let repo = create_committed_repo("worktree-unforced-leftover-repo");
+        let checkout = unique_temp_path("worktree-unforced-leftover-checkout");
+
+        let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(checkout.join("leftover"), "leftover\n").unwrap();
+
+        let err =
+            run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, false, false)
+                .expect_err("a leftover directory needs force");
+
+        assert!(is_not_working_tree_remove_error(&err));
+        assert!(checkout.join("leftover").exists());
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]

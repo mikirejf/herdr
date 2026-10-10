@@ -52,10 +52,12 @@ impl App {
         source: WorktreeSource,
         entries: Vec<crate::worktree::ExistingWorktree>,
     ) -> String {
-        let worktrees = entries
+        let mut worktrees: Vec<WorktreeInfo> = entries
             .into_iter()
             .map(|entry| self.worktree_info_for_entry(&source, entry))
             .collect();
+        let orphaned = self.orphaned_worktree_infos(&source, &worktrees);
+        worktrees.extend(orphaned);
 
         encode_success(
             id,
@@ -64,6 +66,40 @@ impl App {
                 worktrees,
             },
         )
+    }
+
+    /// Open linked-worktree workspaces whose checkout Git no longer lists, for example
+    /// after `git worktree remove` ran outside Herdr. They are reported as prunable so
+    /// callers can still find and remove the stale workspace.
+    fn orphaned_worktree_infos(
+        &self,
+        source: &WorktreeSource,
+        listed: &[WorktreeInfo],
+    ) -> Vec<WorktreeInfo> {
+        let listed: Vec<PathBuf> = listed
+            .iter()
+            .map(|info| crate::worktree::canonical_or_original(Path::new(&info.path)))
+            .collect();
+        self.state
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter_map(|(ws_idx, ws)| {
+                let space = ws.worktree_space()?;
+                if !space.is_linked_worktree
+                    || space.key != source.repo_key
+                    || listed.contains(&crate::worktree::canonical_or_original(
+                        &space.checkout_path,
+                    ))
+                {
+                    return None;
+                }
+                let mut info = self
+                    .worktree_info_for_membership(space, Some(self.public_workspace_id(ws_idx)));
+                info.is_prunable = true;
+                Some(info)
+            })
+            .collect()
     }
 
     fn finish_worktree_open(
@@ -2194,6 +2230,84 @@ mod tests {
         assert!(entry.is_linked_worktree);
 
         run_git(&repo, &["worktree", "prune"]);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn api_worktree_remove_closes_workspace_whose_checkout_was_removed_outside_herdr() {
+        let repo = create_committed_repo("api-worktree-remove-gone-repo");
+        let checkout = unique_temp_path("api-worktree-remove-gone-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "worktree/api-remove-gone",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let mut app = app_with_parent(&repo);
+        let mut child = Workspace::test_new("child");
+        child.identity_cwd = checkout.clone();
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: crate::workspace::git_space_metadata(&repo).unwrap().key,
+            label: "api-worktree-remove-gone-repo".into(),
+            repo_root: repo.clone(),
+            checkout_path: checkout.clone(),
+            is_linked_worktree: true,
+        });
+        let child_id = child.id.clone();
+        app.state.workspaces.push(child);
+        app.state.ensure_test_terminals();
+        run_git(
+            &repo,
+            &["worktree", "remove", "--force", checkout.to_str().unwrap()],
+        );
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeList(WorktreeListParams {
+                    workspace_id: Some(child_id.clone()),
+                    cwd: None,
+                    trust_repository: false,
+                }),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeList { worktrees, .. } = success.result else {
+            panic!("expected worktree_list response");
+        };
+        let entry = worktrees
+            .iter()
+            .find(|entry| entry.path == checkout.display().to_string())
+            .expect("workspace with a missing checkout should still be listed");
+        assert!(entry.is_prunable);
+        assert!(entry.is_linked_worktree);
+        assert_eq!(entry.open_workspace_id.as_deref(), Some(child_id.as_str()));
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeRemove(WorktreeRemoveParams {
+                    workspace_id: child_id,
+                    force: false,
+                    trust_repository: false,
+                }),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorktreeRemoved { .. }
+        ));
+        assert_eq!(app.state.workspaces.len(), 1);
+
         let _ = std::fs::remove_dir_all(repo);
     }
 
